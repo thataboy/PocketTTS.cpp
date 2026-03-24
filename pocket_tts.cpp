@@ -249,50 +249,161 @@ static std::vector<float> resample(const std::vector<float>& in, int src, int ds
 }
 
 // ── Sentence Splitting ──────────────────────────────────────────────────────
-// Splits on sentence-ending punctuation (. ! ?) followed by whitespace or EOF.
+// Splits on sentence-ending punctuation .!? followed by whitespace or EOF.
 // Preserves punctuation with the sentence. Handles common abbreviations.
 
+// Splits on fallback punctuation ,;:)] and emdash if sentence is getting too long
+// and .!? has not been found yet.
+// Splits on whitespace as a last resort.
+// Loosely enforces minimum sentence length for better prosody.
+// Does not split at all if sentence is under maximum length.
+
 static std::vector<std::string> split_sentences(const std::string& text) {
+    constexpr size_t kMaxLen = 300;
+    constexpr size_t kFallbackSplitLen = 200;
+    constexpr size_t kMinLen = 50;
+
     std::vector<std::string> sentences;
+    if (text.size() < kMaxLen) {
+        sentences.push_back(text);
+        return sentences;
+    }
+
     std::string current;
-    
+    // position of last primary break character .!?
+    // that we might've passed up because current is too short
+    size_t last_primary_pos = std::string::npos;
+    // position of last fallback break character ,;:)]—
+    size_t last_fallback_pos = std::string::npos;
+    // position of last whitespace, used as last resort if no primary or fallback break found
+    size_t last_space_pos = std::string::npos;
+
+    auto push_chunk = [&](const std::string& chunk) {
+        if (!chunk.empty()) {
+            size_t start = chunk.find_first_not_of(" \t\n\r");
+            if (start != std::string::npos) {
+                sentences.push_back(chunk.substr(start));
+            }
+        }
+    };
+
+    auto is_em_dash = [&](const std::string& s, size_t i) -> bool {
+        if (i + 2 >= s.size()) return false;
+        return static_cast<unsigned char>(s[i]) == 0xE2 &&
+               static_cast<unsigned char>(s[i + 1]) == 0x80 &&
+               static_cast<unsigned char>(s[i + 2]) == 0x94;
+    };
+
     auto is_abbreviation = [](const std::string& s, size_t dot_pos) -> bool {
         if (dot_pos < 2) return false;
         size_t start = dot_pos;
         while (start > 0 && std::isalpha((unsigned char)s[start - 1])) start--;
         std::string word = s.substr(start, dot_pos - start);
         for (auto& c : word) c = std::tolower((unsigned char)c);
-        return word == "mr" || word == "mrs" || word == "ms" || word == "dr" || 
+        return word == "mr" || word == "mrs" || word == "ms" || word == "dr" ||
                word == "st" || word == "jr" || word == "sr" || word == "vs" ||
                word == "etc" || word == "inc" || word == "ltd" || word == "prof" ||
                word == "gen" || word == "gov" || word == "sgt" || word == "cpl" ||
                word == "pvt" || word == "capt" || word == "lt" || word == "col";
     };
-    
+
+    auto looks_like_boundary_after = [&](const std::string& s, size_t i, size_t char_len = 1) -> bool {
+        size_t next_idx = i + char_len;
+        if (next_idx >= s.size()) return true;
+        return !std::isalnum(static_cast<unsigned char>(s[next_idx]));
+    };
+
+    auto is_primary_break = [&](const std::string& s, size_t i) -> bool {
+        char ch = s[i];
+        if (ch != '.' && ch != '!' && ch != '?') return false;
+        if (ch == '.') {
+            if (i + 1 < s.size() && s[i + 1] == '.') return false;
+            if (i > 0 && s[i - 1] == '.') return false;
+            if (is_abbreviation(s, i)) return false;
+        }
+        return looks_like_boundary_after(s, i);
+    };
+
+    auto is_fallback_break = [&](const std::string& s, size_t i, size_t& len) -> bool {
+        len = 1;
+        if (std::string(",;:)]").find(s[i]) != std::string::npos) {
+            return looks_like_boundary_after(s, i);
+        }
+        if (is_em_dash(s, i)) {
+            len = 3;
+            return looks_like_boundary_after(s, i, 3);
+        }
+        return false;
+    };
+
     for (size_t i = 0; i < text.size(); ++i) {
         current += text[i];
-        
-        if ((text[i] == '.' || text[i] == '!' || text[i] == '?')) {
-            if (text[i] == '.' && i + 1 < text.size() && text[i + 1] == '.') continue;
-            if (text[i] == '.' && i > 0 && text[i - 1] == '.') continue;
-            if (text[i] == '.' && is_abbreviation(text, i)) continue;
-            if (i + 1 >= text.size() || text[i + 1] == ' ' || text[i + 1] == '"' || text[i + 1] == '\'') {
-                size_t start = current.find_first_not_of(" \t\n\r");
-                if (start != std::string::npos) {
-                    sentences.push_back(current.substr(start));
-                }
+        size_t current_idx = current.size() - 1;
+
+        if (std::isspace(static_cast<unsigned char>(text[i]))) {
+            last_space_pos = current_idx;
+        } else if (is_primary_break(text, i)) {
+            if (current.size() >= kMinLen) {
+                push_chunk(current);
                 current.clear();
+                last_fallback_pos = last_primary_pos = last_space_pos = std::string::npos;
+                continue;
+            } else {
+                last_primary_pos = current_idx;
+            }
+        }
+
+        size_t char_len = 1;
+        if (is_fallback_break(text, i, char_len)) {
+            last_fallback_pos = current_idx + (char_len - 1);
+            for (size_t j = 1; j < char_len; ++j) {
+                if (++i < text.size()) current += text[i];
+            }
+        }
+
+        bool hit_hard_limit = (current.size() >= kMaxLen);
+        bool hit_soft_limit = (current.size() >= kFallbackSplitLen);
+
+        if (hit_soft_limit || hit_hard_limit) {
+            size_t split_at = std::string::npos;
+
+            if (last_fallback_pos != std::string::npos && last_primary_pos != std::string::npos) {
+                split_at = last_fallback_pos > last_primary_pos ? last_fallback_pos : last_primary_pos;
+            } else if (last_fallback_pos != std::string::npos) {
+                split_at = last_fallback_pos;
+            } else if (last_primary_pos != std::string::npos) {
+                split_at = last_primary_pos;
+            } else if (hit_hard_limit && last_space_pos != std::string::npos) {
+                split_at = last_space_pos;
+            }
+
+            if (split_at != std::string::npos) {
+                push_chunk(current.substr(0, split_at + 1));
+                current.erase(0, split_at + 1);
+
+                // Cleanup leading spaces
+                size_t start = current.find_first_not_of(" \r\n\t");
+                if (start != std::string::npos) current.erase(0, start);
+                else current.clear();
+
+                // Rebuild trackers for the remaining 'current' string
+                last_fallback_pos = last_primary_pos = last_space_pos = std::string::npos;
+                for (size_t j = 0; j < current.size(); ++j) {
+                    if (std::isspace(static_cast<unsigned char>(current[j]))) last_space_pos = j;
+                    else if (is_primary_break(current, j)) last_primary_pos = j;
+                    else {
+                        size_t char_len = 1;
+                        if (is_fallback_break(current, j, char_len)) {
+                            last_fallback_pos = j + (char_len - 1);
+                            j += (char_len - 1);
+                        }
+                    }
+                }
             }
         }
     }
-    
-    if (!current.empty()) {
-        size_t start = current.find_first_not_of(" \t\n\r");
-        if (start != std::string::npos) {
-            sentences.push_back(current.substr(start));
-        }
-    }
-    
+
+    push_chunk(current);
     return sentences;
 }
 
