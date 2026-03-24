@@ -1,5 +1,6 @@
 # Build artifacts
 .build/
+build/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -7,12 +8,15 @@ Makefile
 
 # Compiled binaries
 pocket-tts
+pocket-server
+pocket-cli
 *.so
 *.so.*
 *.dylib
 *.dll
 *.lib
 *.exe
+*.wav
 
 # ONNX models (too large for git — download from HuggingFace)
 models/*.onnx
@@ -33,3 +37,5 @@ voices/
 *.swo
 *~
 .DS_Store
+
+italk.yaml

@@ -1,18 +1,7 @@
-# PocketTTS.cpp — Single-file C++ TTS runtime using ONNX Runtime
-# https://github.com/VolgaGerm/PocketTTS.cpp
-#
-# Build:
-#   cmake -B .build -DCMAKE_BUILD_TYPE=Release
-#   cmake --build .build -j$(nproc)
-#
-# Clean:
-#   rm -rf .build
-#
-# Run:
-#   ./pocket-tts "Hello world" voice.wav output.wav
-
 cmake_minimum_required(VERSION 3.28)
 project(pocket_tts VERSION 1.0.0 LANGUAGES CXX C)
+
+find_package(yaml-cpp REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,7 +68,7 @@ if(NOT CONTENT MATCHES \"#include <cstdint>\")
     message(STATUS \"Patched sentencepiece_processor.h for GCC 14 compatibility\")
 endif()
 file(READ \"\${SOURCE_DIR}/CMakeLists.txt\" CMLCONTENT)
-string(REGEX REPLACE \"cmake_minimum_required\\\\(VERSION [0-9.]+\\\\)\" \"cmake_minimum_required(VERSION 3.14)\" CMLCONTENT \"\${CMLCONTENT}\")
+string(REGEX REPLACE \"cmake_minimum_required\\(VERSION [0-9.]+\\)\" \"cmake_minimum_required(VERSION 3.14)\" CMLCONTENT \"\${CMLCONTENT}\")
 file(WRITE \"\${SOURCE_DIR}/CMakeLists.txt\" \"\${CMLCONTENT}\")
 ")
 
@@ -109,43 +98,53 @@ FetchContent_MakeAvailable(dr_libs)
 
 option(BUILD_SHARED_LIB "Build libpocket_tts.so for FFI (Deno, Python, etc.)" OFF)
 
-# Executable (CLI + HTTP server)
-add_executable(pocket-tts pocket_tts.cpp)
-
-target_include_directories(pocket-tts PRIVATE
+set(POCKET_COMMON_INCLUDE_DIRS
     ${ONNXRUNTIME_INCLUDE_DIR}
     ${SENTENCEPIECE_INCLUDE_DIRS}
     ${dr_libs_SOURCE_DIR}
 )
 
-target_link_libraries(pocket-tts PRIVATE
+set(POCKET_COMMON_LINK_LIBS
     ${ONNXRUNTIME_LIB}
     sentencepiece-static
+    yaml-cpp::yaml-cpp
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(pocket-tts PRIVATE pthread dl)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_link_libraries(pocket-tts PRIVATE ws2_32)
-endif()
+function(configure_pocket_target target_name)
+    target_include_directories(${target_name} PRIVATE ${POCKET_COMMON_INCLUDE_DIRS})
+    target_link_libraries(${target_name} PRIVATE ${POCKET_COMMON_LINK_LIBS})
 
-# Copy ONNX runtime shared library next to outputs
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    add_custom_command(TARGET pocket-tts POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll
-            $<TARGET_FILE_DIR:pocket-tts>
-    )
-else()
-    add_custom_command(TARGET pocket-tts POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:pocket-tts>
-    )
-endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(${target_name} PRIVATE pthread dl)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_link_libraries(${target_name} PRIVATE ws2_32)
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll
+                $<TARGET_FILE_DIR:${target_name}>
+        )
+    else()
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:${target_name}>
+        )
+    endif()
+endfunction()
+
+# CLI executable
+add_executable(pocket-cli pocket_cli.cpp)
+configure_pocket_target(pocket-cli)
+
+# HTTP server executable
+add_executable(pocket-server pocket_server.cpp)
+configure_pocket_target(pocket-server)
 
 # Shared library (for FFI from Deno/Python)
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
 if(BUILD_SHARED_LIB)
-    add_library(pocket-tts-lib SHARED pocket_tts.cpp)
+    add_library(pocket-tts-lib SHARED pocket_tts_engine.cpp)
     set_target_properties(pocket-tts-lib PROPERTIES
         OUTPUT_NAME "pocket_tts"
         BUILD_RPATH "$ORIGIN"
@@ -163,11 +162,8 @@ if(BUILD_SHARED_LIB)
     )
     target_link_directories(pocket-tts-lib PRIVATE ${ONNXRUNTIME_ROOT}/lib)
 
-    target_include_directories(pocket-tts-lib PRIVATE
-        ${ONNXRUNTIME_INCLUDE_DIR}
-        ${SENTENCEPIECE_INCLUDE_DIRS}
-        ${dr_libs_SOURCE_DIR}
-    )
+    target_include_directories(pocket-tts-lib PRIVATE ${POCKET_COMMON_INCLUDE_DIRS})
+    target_link_libraries(pocket-tts-lib PRIVATE yaml-cpp::yaml-cpp)
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(pocket-tts-lib PRIVATE pthread dl)
@@ -204,9 +200,9 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_VERSION}")
 message(STATUS "SentencePiece: v0.2.1")
 if(BUILD_SHARED_LIB)
-    message(STATUS "Targets: pocket-tts (CLI), libpocket_tts.so (FFI)")
+    message(STATUS "Targets: pocket-cli, pocket-server, libpocket_tts.so")
 else()
-    message(STATUS "Targets: pocket-tts (CLI)")
+    message(STATUS "Targets: pocket-cli, pocket-server")
 endif()
 message(STATUS "=====================")
 message(STATUS "")

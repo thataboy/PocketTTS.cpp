@@ -1,0 +1,15 @@
+{
+  "short_name": "iTalk",
+  "name": "iTalk",
+  "icons": [
+    {
+      "src": "italk.png",
+      "type": "image/png",
+      "sizes": "300x300"
+    }
+  ],
+  "start_url": "/italk",
+  "display": "standalone",
+  "background_color": "#333333",
+  "theme_color": "#3a4e5e"
+}
