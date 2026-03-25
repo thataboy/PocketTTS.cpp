@@ -26,6 +26,12 @@ voices/
 # Voice embedding cache
 .cache/
 
+# Python virtual environment
+.venv/
+
+# Export script weight cache
+models/.cache/
+
 # Editor / OS
 .vscode/
 .idea/
