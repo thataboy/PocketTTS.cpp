@@ -952,13 +952,19 @@ class TTSServer {
         DIR* dir = opendir(tts_.config().voices_dir.c_str());
         if (!dir) return;
         struct dirent* ent;
+        std::string voice;
+        std::cout << "Loading voices..." << std::flush;
         while ((ent = readdir(dir)) != nullptr) {
             std::string n = ent->d_name;
             if (n.size() > 4 && n.substr(n.size() - 4) == ".wav") {
-                voice_names_.push_back(n.substr(0, n.size() - 4));
+                voice = n.substr(0, n.size() - 4);
+                std::cout << " " << voice << std::flush;
+                tts_.prepare_voice(voice);
+                voice_names_.push_back(voice);
             }
         }
         closedir(dir);
+        std::cout << std::endl;
         std::sort(voice_names_.begin(), voice_names_.end());
     }
 
@@ -1260,7 +1266,8 @@ private:
                 auto end = std::chrono::high_resolution_clock::now();
                 double elapsed = std::chrono::duration<double>(end - start).count();
                 double duration = double(total_samples) / PocketTTS::SR;
-                std::cout << "     len: " << text.size()
+                std::cout << "     len: " << std::fixed << std::setprecision(2)
+                                          << duration << "s (" << text.size() << ")"
                           << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                           << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
                           << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n";
@@ -1310,7 +1317,8 @@ private:
                 if (send_binary_response(client_fd, "audio/wav", wav)) {
                     double elapsed = std::chrono::duration<double>(end - start).count();
                     double duration = static_cast<double>(all_samples.size()) / 24000.0;
-                    std::cout << "     len: " << text.size()
+                    std::cout << "     len: " << std::fixed << std::setprecision(2)
+                                              << duration << "s (" << text.size() << ")"
                               << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
                               << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n";
                 }
