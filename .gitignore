@@ -24,6 +24,8 @@ models/*.onnx
 # Tokenizer model (bundled with ONNX models)
 models/tokenizer.model
 
+models*/
+
 # Voice samples
 voices/
 

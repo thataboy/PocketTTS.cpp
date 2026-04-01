@@ -1328,6 +1328,50 @@ private:
             return;
         }
 
+        // /generate
+        if (req.method == "POST" && req.path == "/generate") {
+            try {
+                auto j = json::parse(req.body);
+                std::string text = j.value("text", "");
+                std::string voice = j.value("voice", "narrator");
+
+                if (text.empty()) {
+                    send_response(client_fd, 400, "text/plain", "Missing text");
+                    return;
+                }
+
+                std::cout << voice << "➡️" << text << "⬅️\n";
+                auto start = std::chrono::high_resolution_clock::now();
+
+                bool client_disconnected = false;
+
+                AudioData audio;
+                {
+                    std::lock_guard<std::mutex> lock(tts_mutex_);
+                    audio = tts_.generate(text, voice);
+                }
+
+                if (!is_socket_alive(client_fd)) {
+                    std::cout << "  Client disconnected during synthesis.\n";
+                    return;
+                }
+
+                auto wav = wav_encode(audio.samples.data(), audio.samples.size(), PocketTTS::SR);
+                auto end = std::chrono::high_resolution_clock::now();
+                if (send_binary_response(client_fd, "audio/wav", wav)) {
+                    double elapsed = std::chrono::duration<double>(end - start).count();
+                    double duration = audio.duration_sec();
+                    std::cout << "     len: " << std::fixed << std::setprecision(2)
+                                              << duration << "s (" << text.size() << ")"
+                              << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
+                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n";
+                }
+            } catch (const std::exception& e) {
+                send_json_error(client_fd, 400, e.what());
+            }
+            return;
+        }
+
         // /voices
         if (req.method == "GET" && (req.path == "/voices" || req.path == "/voices/refresh")) {
             if (req.path == "/voices/refresh") scan_voices();
