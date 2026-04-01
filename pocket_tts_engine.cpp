@@ -134,7 +134,7 @@ struct Config {
     float temperature = 0.7f;
     float eos_threshold = -4.0f;
     float noise_clamp = 0.0f;
-    int lsd_steps = 1, num_threads = 4, first_chunk_frames = 1, max_chunk_frames = 15;
+    int lsd_steps = 1, num_threads = 0, first_chunk_frames = 1, max_chunk_frames = 15;
     int eos_extra_frames = -1;  // -1 = auto-calculate from text length
     bool verbose = false;
     bool voice_cache = true;
@@ -1482,11 +1482,13 @@ public:
         // get the full budget since they run alone.
         int cores = std::max(1, int(std::thread::hardware_concurrency()));
         int total = cfg_.num_threads ? cfg_.num_threads : std::max(2, cores / 2);
-        // Balance threads so gen thread and decoder thread finish at roughly the same time.
-        // AR is compute-dense per step; decoder has fewer but heavier calls.
-        int threads_dec = std::max(1, total / 2);
-        int threads_ar = std::max(1, total - threads_dec);
+        total = std::min(total, 8);  // cap at 8
         int threads_full = total;
+        // Ensure that there are 3x decoder threads as AR threads
+        // this seems to prevent robotic voice in output
+        total = std::max(total, 3);
+        int threads_ar = total / 3;
+        int threads_dec = total - threads_ar;
 
         auto make_opts = [](int threads) {
             Ort::SessionOptions opts;
@@ -1519,8 +1521,8 @@ public:
         if (cfg_.verbose) {
             std::cout << "\n========== ONNX RUNTIME INFO ==========\n";
             std::cout << "  ORT Version: " << OrtGetApiBase()->GetVersionString() << "\n";
-            std::cout << "  Thread budget: " << total << " (AR: " << threads_ar
-                      << ", decoder: " << threads_dec << ", full: " << threads_full << ")\n";
+            std::cout << "  Thread budget: AR: " << threads_ar
+                      << ", decoder: " << threads_dec << ", full: " << threads_full << "\n";
             auto providers = Ort::GetAvailableProviders();
             std::cout << "  Execution Providers: ";
             for (size_t i = 0; i < providers.size(); ++i) {
