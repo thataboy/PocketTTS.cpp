@@ -133,18 +133,14 @@ function(configure_pocket_target target_name)
     endif()
 endfunction()
 
-# CLI executable
-add_executable(pocket-cli pocket_cli.cpp)
-configure_pocket_target(pocket-cli)
-
-# HTTP server executable
-add_executable(pocket-server pocket_server.cpp)
-configure_pocket_target(pocket-server)
+# executable
+add_executable(ptts ptts.cpp)
+configure_pocket_target(ptts)
 
 # Shared library (for FFI from Deno/Python)
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
 if(BUILD_SHARED_LIB)
-    add_library(pocket-tts-lib SHARED pocket_tts_engine.cpp)
+    add_library(pocket-tts-lib SHARED ptts_engine.cpp)
     set_target_properties(pocket-tts-lib PROPERTIES
         OUTPUT_NAME "pocket_tts"
         BUILD_RPATH "$ORIGIN"
@@ -200,9 +196,9 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_VERSION}")
 message(STATUS "SentencePiece: v0.2.1")
 if(BUILD_SHARED_LIB)
-    message(STATUS "Targets: pocket-cli, pocket-server, libpocket_tts.so")
+    message(STATUS "Targets: ptts, libpocket_tts.so")
 else()
-    message(STATUS "Targets: pocket-cli, pocket-server")
+    message(STATUS "Targets: ptts")
 endif()
 message(STATUS "=====================")
 message(STATUS "")

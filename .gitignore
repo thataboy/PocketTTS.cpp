@@ -10,6 +10,7 @@ Makefile
 pocket-tts
 pocket-server
 pocket-cli
+ptts
 *.so
 *.so.*
 *.dylib

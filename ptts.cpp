@@ -1,4 +1,4 @@
-// PocketTTS server executable
+// PocketTTS executable
 // Refactored from the original single-file implementation.
 
 // ── Platform (must come first — winsock2.h before windows.h) ────────────────
@@ -34,7 +34,7 @@
   #include <signal.h>
 #endif
 
-#include "pocket_tts_engine.cpp"
+#include "ptts_engine.cpp"
 
 #include <atomic>
 #include <filesystem>
@@ -959,7 +959,7 @@ class TTSServer {
             if (n.size() > 4 && n.substr(n.size() - 4) == ".wav") {
                 voice = n.substr(0, n.size() - 4);
                 std::cout << " " << voice << std::flush;
-                tts_.prepare_voice(voice);
+                // tts_.prepare_voice(voice);
                 voice_names_.push_back(voice);
             }
         }
@@ -1223,8 +1223,8 @@ private:
                     return;
                 }
 
-                std::cout << "\n⏩" << voice << "➡️" << text.substr(0, 200)
-                          << (text.size() > 200 ? "..." : "") << "⬅️\n";
+                std::cout << "\n⏩" << voice << "➡️" << text.substr(0, 150)
+                          << (text.size() > 150 ? "..." : "") << "⬅️\n";
 
                 auto start = std::chrono::high_resolution_clock::now();
 
@@ -1289,7 +1289,8 @@ private:
                     return;
                 }
 
-                std::cout << voice << "➡️" << text << "⬅️\n";
+                std::cout << voice << "➡️" << text.substr(0, 100)
+                          << (text.size() > 100 ? "..." : "") << "⬅️\n";
                 auto start = std::chrono::high_resolution_clock::now();
 
                 std::vector<float> all_samples;
@@ -1329,6 +1330,7 @@ private:
         }
 
         // /generate
+        /*
         if (req.method == "POST" && req.path == "/generate") {
             try {
                 auto j = json::parse(req.body);
@@ -1371,10 +1373,14 @@ private:
             }
             return;
         }
+        */
 
         // /voices
         if (req.method == "GET" && (req.path == "/voices" || req.path == "/voices/refresh")) {
-            if (req.path == "/voices/refresh") scan_voices();
+            if (req.path == "/voices/refresh") {
+                scan_voices();
+                tts_.clear_vcache();
+            }
             json j;
             j["voices"] = voice_names_;
             send_response(client_fd, 200, "application/json", j.dump());
@@ -1484,9 +1490,133 @@ static void signal_handler(int sig) {
     std::cout << "\nShutting down...\n";
 }
 
+static int serve(const pocket_tts::Config& cfg, int server_port) {
+    try {
+        int threads = cfg.num_threads ? cfg.num_threads : std::max(2, int(std::thread::hardware_concurrency()) / 2);
+        std::cerr << "Loading (precision=" << cfg.precision << ", threads=" << threads << ")...\n";
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        pocket_tts::PocketTTS tts(cfg);
+        auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count(); };
+
+        std::cerr << "  Loaded in " << std::fixed << std::setprecision(2) << elapsed() << "s\n";
+        double warmup_ms = tts.warmup();
+        std::cerr << "  Warmup in " << std::fixed << std::setprecision(0) << warmup_ms << "ms\n";
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+#ifndef _WIN32
+        signal(SIGPIPE, SIG_IGN);
+#endif
+
+        pocket_tts::TTSServer server(tts, server_port);
+        if (!server.start()) return 1;
+        server.run();
+
+        if (pocket_tts::g_prof.enabled) tts.print_profiling_report();
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+static int generate(
+    const pocket_tts::Config& cfg,
+    const std::string& text,
+    const std::string& voice,
+    const std::string& output) {
+
+    bool stdout_output = output.empty();
+
+    try {
+        int threads = cfg.num_threads ? cfg.num_threads : std::max(2, int(std::thread::hardware_concurrency()) / 2);
+
+        if (!stdout_output) {
+            std::cerr << "Loading (precision=" << cfg.precision << ", threads=" << threads << ")...\n";
+        }
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        pocket_tts::PocketTTS tts(cfg);
+        auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count(); };
+
+        if (!stdout_output) {
+            std::cerr << "  Loaded in " << std::fixed << std::setprecision(2) << elapsed() << "s\n";
+            std::cerr << "Generating: \"" << text << "\" with " << voice << "\n";
+        }
+        t0 = std::chrono::high_resolution_clock::now();
+
+        pocket_tts::AudioData audio;
+        double first_chunk_latency = 0;
+
+        if (stdout_output) {
+#ifdef _WIN32
+            _setmode(_fileno(stdout), _O_BINARY);
+#endif
+            size_t total_samples = 0;
+            bool first = true;
+            tts.stream(text, voice, [&](const float* s, size_t n) {
+                if (first) {
+                    first_chunk_latency = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0).count();
+                    first = false;
+                }
+                fwrite(s, sizeof(float), n, stdout);
+                fflush(stdout);
+                total_samples += n;
+                return true;
+            });
+            audio.sample_rate = pocket_tts::PocketTTS::SR;
+            audio.samples.resize(total_samples);
+        } else {
+            if (pocket_tts::g_prof.enabled) {
+                std::vector<float> samples;
+                bool first = true;
+                tts.stream(text, voice, [&](const float* s, size_t n) {
+                    if (first) {
+                        first_chunk_latency = std::chrono::duration<double, std::milli>(
+                            std::chrono::high_resolution_clock::now() - t0).count();
+                        first = false;
+                    }
+                    samples.insert(samples.end(), s, s + n);
+                    return true;
+                });
+                audio = {std::move(samples), pocket_tts::PocketTTS::SR};
+            } else {
+                audio = tts.generate(text, voice);
+            }
+        }
+
+        double gen_time = elapsed();
+        double duration = audio.duration_sec();
+
+        std::cerr << "  " << std::fixed << std::setprecision(2)
+                  << duration << "s audio in " << gen_time << "s (RTFx: " << duration / gen_time << "x)\n";
+        if (pocket_tts::g_prof.enabled) {
+            std::cerr << "  First chunk latency: " << std::fixed << std::setprecision(0)
+                      << first_chunk_latency << "ms\n";
+        }
+
+        if (!stdout_output) {
+            pocket_tts::PocketTTS::save_audio(audio, output);
+            std::cerr << "  Saved: " << output << "\n";
+        }
+
+        if (pocket_tts::g_prof.enabled) {
+            tts.print_profiling_report();
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 int main(int argc, char* argv[]) {
     pocket_tts::Config cfg;
     int server_port = 9000;
+    std::string text, voice, output;
+    int nargs = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -1497,7 +1627,9 @@ int main(int argc, char* argv[]) {
 
         if (a == "-h" || a == "--help") {
             std::cerr
-                << "Usage: " << argv[0] << " [OPTIONS]\n\n"
+                << "\nUsage:\n"
+                << "   Start Server:    " << argv[0] << " [OPTIONS]\n"
+                << "   Generate TTS:    " << argv[0] << " [OPTIONS] TEXT VOICE [OUTPUT]\n\n"
                 << "Options:\n"
                 << "  --port <port>            Server port (default: 9000)\n"
                 << "  --precision <int8|fp32>  Model precision (default: int8)\n"
@@ -1534,37 +1666,26 @@ int main(int argc, char* argv[]) {
         else if (a == "--verbose") cfg.verbose = true;
         else if (a == "--profile") pocket_tts::g_prof.enabled = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "Unknown: " << a << "\n"; return 1; }
-        else { std::cerr << "Unexpected positional argument: " << a << "\n"; return 1; }
+        else {
+            if (nargs == 0) text = a;
+            else if (nargs == 1) voice = a;
+            else if (nargs == 2) output = a;
+            ++nargs;
+        }
     }
 
-    try {
-        int threads = cfg.num_threads ? cfg.num_threads : std::max(2, int(std::thread::hardware_concurrency()) / 2);
-        std::cerr << "Loading (precision=" << cfg.precision << ", threads=" << threads << ")...\n";
-
-        auto t0 = std::chrono::high_resolution_clock::now();
-        pocket_tts::PocketTTS tts(cfg);
-        auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count(); };
-
-        std::cerr << "  Loaded in " << std::fixed << std::setprecision(2) << elapsed() << "s\n";
-        double warmup_ms = tts.warmup();
-        std::cerr << "  Warmup in " << std::fixed << std::setprecision(0) << warmup_ms << "ms\n";
-
-        signal(SIGINT, signal_handler);
-        signal(SIGTERM, signal_handler);
-#ifndef _WIN32
-        signal(SIGPIPE, SIG_IGN);
-#endif
-
-        pocket_tts::TTSServer server(tts, server_port);
-        if (!server.start()) return 1;
-        server.run();
-
-        if (pocket_tts::g_prof.enabled) tts.print_profiling_report();
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+    if (nargs == 0) {
+        return serve(cfg, server_port);
+    }
+    if (nargs < 2) {
+        std::cerr << "Need: TEXT VOICE [OUTPUT]\n";
         return 1;
     }
+    if (output.empty()) {
+        cfg.verbose = false;
+        pocket_tts::g_prof.enabled = false;
+    }
+    return generate(cfg, text, voice, output);
 }
 
 #endif // PTT_SHARED_LIB

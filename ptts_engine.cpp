@@ -498,15 +498,15 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
         for (char c : text) {
             if (c == ' ') { in_word = false; }
             else if (!in_word) {
-                in_word = true; count++;
-                if (count >= max) return count;
+                in_word = true;
+                if (++count >= max) return count;
             }
         }
         return count;
     };
 
 
-    int nwords = count_words(text, 5);
+    int nwords = count_words(text);
     uint64_t val = rng::next();
     int eos_extra = cfg_eos_extra;
     if (eos_extra < 0) {
@@ -517,11 +517,11 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
             eos_extra =
                 c == '.' || c == '?' || c == ';'
                 ? 2 + (val % 3)
-                : (val % 3);
+                : 1 + (val % 2);
         }
     }
 
-    std::cout << eos_extra << "↗️" << text << "↖️\n";
+    std::cout << nwords << "|" << eos_extra << "↗️" << text << "↖️\n";
     // Pad short text — model doesn't perform well with very few tokens
     // return {nwords > 4 ? text : "        " + text, eos_extra};
     return eos_extra;
@@ -1679,6 +1679,10 @@ public:
         voice_kv_path_ = p;
         std::string resolved = resolve_voice_path(p);
         encode_voice(resolved);
+    }
+
+    void clear_vcache() {
+        vcache_.clear();
     }
 
     double warmup() {
