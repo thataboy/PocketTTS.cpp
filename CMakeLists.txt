@@ -137,6 +137,12 @@ endfunction()
 add_executable(ptts ptts.cpp)
 configure_pocket_target(ptts)
 
+if (MSVC)
+    target_compile_options(ptts PRIVATE /W4 /WX)
+else ()
+    target_compile_options(ptts PRIVATE -Wall -Wextra -Wpedantic)
+endif ()
+
 # Shared library (for FFI from Deno/Python)
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
 if(BUILD_SHARED_LIB)

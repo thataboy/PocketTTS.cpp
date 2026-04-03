@@ -457,7 +457,7 @@ class TTSServer {
     bool send_json_error(ptt_socket_t fd, int status, const std::string& msg) {
         json j;
         j["error"] = msg;
-        return send_response(fd, 400, "application/json", j.dump());
+        return send_response(fd, status, "application/json", j.dump());
     }
 
     static bool starts_with(const std::string& s, const std::string& prefix) {

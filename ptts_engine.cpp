@@ -221,7 +221,7 @@ static std::vector<float> resample(const std::vector<float>& in, int src, int ds
 // Preserves punctuation with the sentence. Handles common abbreviations.
 
 // Splits on fallback punctuation ,;:)] and -- if sentence is getting too long
-// and .!? has not been found yet.
+// and .? has not been found yet.
 // Splits on whitespace as a last resort.
 // Loosely enforces minimum sentence length for better prosody.
 // Does not split at all if sentence is under maximum length.
@@ -229,63 +229,78 @@ static std::vector<float> resample(const std::vector<float>& in, int src, int ds
 
 // change \n to ", " and collapse whitespaces; remove troublesome chars
 std::string clean_text(const std::string& raw) {
-    std::string cleaned = raw;
+    std::string text;
+    text.reserve(raw.size());
 
-    auto replaceUtf8 = [](std::string& s, const char* seq, const std::string& str2) {
-        size_t len = strlen(seq);
-        size_t pos = 0;
-        while ((pos = s.find(seq, pos)) != std::string::npos) {
-            s.replace(pos, len, str2);
-            pos += str2.size(); // Move past what we just inserted
-        }
+    bool prev_space = true;
+    bool prev_newl = true;
+    bool has_alnum = false;
+
+    // check if a byte is an ASCII alpha OR part of a UTF-8 multibyte char
+    auto maybe_alpha = [](unsigned char c) {
+        return std::isalpha(c) || (c > 127);
     };
 
-    replaceUtf8(cleaned, "\xe2\x80\x9c", ""); // Left curly quote “
-    replaceUtf8(cleaned, "\xe2\x80\x9d", ""); // Right curly quote ”
-    replaceUtf8(cleaned, "\xe2\x80\x94", "--"); // emdash
-    replaceUtf8(cleaned, "\xe2\x80\x98", "");  // left curly apostrophe
-    replaceUtf8(cleaned, "\xe2\x80\x99", "'"); // right curly apostrophe
+    for (size_t i = 0; i < raw.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(raw[i]);
 
-    std::string text;
-    text.reserve(cleaned.size() * 11 / 10);
+        // Handle Multi-byte UTF-8 sequences (Punctuation)
+        if (c == 0xE2 && i + 2 < raw.size()) {
+            unsigned char c2 = static_cast<unsigned char>(raw[i + 1]);
+            unsigned char c3 = static_cast<unsigned char>(raw[i + 2]);
 
-    bool has_alnum = false;
-    bool prev_space = true;  // skip leading white spaces
-    bool prev_newl = true;  // skip leading new lines
-    bool prev_punct = false;
-    for (size_t i = 0; i < cleaned.size(); ++i) {
-        char c = cleaned[i];
+            if (c2 == 0x80) {
+                if (c3 == 0x9C || c3 == 0x9D || c3 == 0x98) { // “ ” ‘
+                    i += 2; continue;
+                }
+                if (c3 == 0x94) { // emdash — -> --
+                    text += "--"; i += 2;
+                    prev_space = prev_newl = false;
+                    continue;
+                }
+                if (c3 == 0xA6) { // ellipsis … -> ...
+                    text += "..."; i += 2;
+                    prev_space = prev_newl = false;
+                    continue;
+                }
+                if (c3 == 0x99) { // right curly apostrophe ’ -> ' and handle ' below'
+                    c = '\''; i += 2;
+                }
+            }
+        }
+
+        // Whitespace Collapsing
         if (c == '\n') {
             if (!prev_newl) {
-                text += prev_punct ? " " : ". ";
+                text += '\n';
                 prev_newl = prev_space = true;
             }
             continue;
-        } else if (c == ' ' || c == '\r' || c == '\t') {
+        }
+        if (c == ' ' || c == '\r' || c == '\t') {
             if (!prev_space) {
                 text += ' ';
                 prev_space = true;
             }
             continue;
         }
-        if (c == '!') c = '.'; // pocket tends to shout with !
-        // only allow ' if it's between alphas, i.e., a contraction
+
+        // Filtering & Normalization
+        if (c == '!') c = '.'; // Keep Pocket from shouting
         else if (c == '\'') {
-            if (i == 0
-                || !std::isalpha(static_cast<unsigned char>(cleaned[i-1]))
-                || i + 1 >= cleaned.size()
-                || !std::isalpha(static_cast<unsigned char>(cleaned[i+1]))
-            ) continue;
+            // only keep ' if between two potential alphas
+            if (i == 0 || !maybe_alpha(static_cast<unsigned char>(raw[i-1]))
+                || i + 1 >= raw.size() || !maybe_alpha(static_cast<unsigned char>(raw[i+1])))
+            continue;
         }
-        // skip these altogether
-        else if (c == '"' || c == '~' || c == '`') continue;
-        else has_alnum |= std::isalnum(static_cast<unsigned char>(c));
-        text += c;
-        prev_punct = std::ispunct(static_cast<unsigned char>(c));
+        else if (c == '"' || c == '~' || c == '`') {
+            continue; // Skip these entirely
+        }
+        text += static_cast<char>(c);
+        has_alnum |= std::isalnum(c);
         prev_newl = prev_space = false;
     }
-    if (!has_alnum) text = "";
-    return text;
+    return has_alnum ? text : "";
 }
 
 static std::vector<std::string> split_sentences(const std::string& raw) {
@@ -296,6 +311,7 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
     std::string text = clean_text(raw);
     std::vector<std::string> sentences;
     std::string current;
+    current.reserve(kMaxLen);
 
     // position of last primary break character .!?
     // that we might've passed up because current is too short
@@ -312,6 +328,12 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
             size_t end = chunk.find_last_not_of(" ");
             sentences.push_back(chunk.substr(start, end - start + 1));
         }
+    };
+
+    auto push_chunk_and_reset = [&](const std::string& chunk) {
+        push_chunk(chunk);
+        current.clear();
+        last_fallback_pos = last_primary_pos = last_space_pos = std::string::npos;
     };
 
     auto is_abbreviation = [&](const std::string& s, size_t dot_pos) -> bool {
@@ -334,7 +356,7 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
 
     auto is_primary_break = [&](const std::string& s, size_t i) -> bool {
         char ch = s[i];
-        if (ch != '.' && ch != '!' && ch != '?') return false;
+        if (ch != '.' && ch != '?') return false;
         if (ch == '.') {
             if (i + 1 < s.size() && s[i + 1] == '.') return false;
             if (i > 0 && s[i - 1] == '.') return false;
@@ -371,18 +393,6 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
         }
     };
 
-    // advance index j past closers
-    auto skip_closers = [&](const std::string& s, size_t& j) {
-        while (j + 1 < s.size()) {
-            char next = s[j + 1];
-            if (is_closer(next)) {
-                j++;
-            } else {
-                break;
-            }
-        }
-    };
-
     if (text.size() <= kMaxLen) {
         push_chunk(text);
         return sentences;
@@ -390,6 +400,13 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
 
     // main loop
     for (size_t i = 0; i < text.size(); ++i) {
+
+        // hard split on \n  do it here so \n is not included
+        if (text[i] == '\n') {
+            push_chunk_and_reset(current);
+            continue;
+        }
+
         current += text[i];
         size_t current_idx = current.size() - 1;
 
@@ -406,9 +423,7 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
                 current_idx = current.size() - 1; // Update index after lookahead
 
                 if (current.size() >= kMinLen) {
-                    push_chunk(current);
-                    current.clear();
-                    last_fallback_pos = last_primary_pos = last_space_pos = std::string::npos;
+                    push_chunk_and_reset(current);
                     continue;
                 } else {
                     last_primary_pos = current_idx;
@@ -440,47 +455,16 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
                 split_at = last_fallback_pos;
             } else if (last_primary_pos != std::string::npos) {
                 split_at = last_primary_pos;
-            } else if (hit_hard_limit && last_space_pos != std::string::npos) {
-                split_at = last_space_pos;
+            } else if (hit_hard_limit) {
+                // last resort: split on last space or arbitrarily at limit
+                split_at = last_space_pos != std::string::npos ? last_space_pos : i;
             }
 
             if (split_at != std::string::npos) {
-                push_chunk(current.substr(0, split_at + 1));
-                current.erase(0, split_at + 1);
-
-                // Cleanup leading spaces
-                size_t start = current.find_first_not_of(" ");
-                if (start != std::string::npos) current.erase(0, start);
-                else current.clear();
-
-                // Rebuild trackers for the remaining 'current' string
-                last_fallback_pos = last_primary_pos = last_space_pos = std::string::npos;
-
-                for (size_t j = 0; j < current.size(); ++j) {
-                    if (current[j] == ' ') {
-                        last_space_pos = j;
-                    } else if (is_primary_break(current, j)) {
-                        // Numeric Guard for decimals
-                        bool is_decimal = (current[j] == '.' && j > 0 && j + 1 < current.size() &&
-                                           std::isdigit((unsigned char)current[j-1]) &&
-                                           std::isdigit((unsigned char)current[j+1]));
-
-                        if (!is_decimal) {
-                            // Manually advance 'j' to swallow closers
-                            skip_closers(current, j);
-                            last_primary_pos = j;
-                        }
-                    } else {
-                        size_t char_len = 1;
-                        if (is_fallback_break(current, j, char_len)) {
-                            // Skip multi-char breaks like --
-                            j += (char_len - 1);
-                            // Manually advance 'j' to swallow closers
-                            skip_closers(current, j);
-                            last_fallback_pos = j;
-                        }
-                    }
-                }
+                int split_len = split_at + 1;
+                // backtrack i to rest of current, if any remains.
+                i -= current.size() - split_len;
+                push_chunk_and_reset(current.substr(0, split_len));
             }
         }
     }
@@ -505,8 +489,7 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
         return count;
     };
 
-
-    int nwords = count_words(text);
+    int nwords = count_words(text, 5);
     uint64_t val = rng::next();
     int eos_extra = cfg_eos_extra;
     if (eos_extra < 0) {
@@ -521,9 +504,7 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
         }
     }
 
-    std::cout << nwords << "|" << eos_extra << "↗️" << text << "↖️\n";
-    // Pad short text — model doesn't perform well with very few tokens
-    // return {nwords > 4 ? text : "        " + text, eos_extra};
+    std::cout << /*nwords << "|" << */ eos_extra << "↗️" << text << "↖️\n";
     return eos_extra;
 }
 
@@ -1789,8 +1770,8 @@ private:
         // Full path: voice conditioning → (optional snapshot) → text conditioning
         LatentGen(PocketTTS& t, const Tensor& v, const TensorI64& tid, int max, int eos_extra, Snapshot* out_voice_snap = nullptr)
             : tts(t), max_(max), eos_extra_(eos_extra), m_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)),
-              fx_(32, 0), cl_(32, std::numeric_limits<float>::quiet_NaN()),
-              main_runner_(*tts.main_runner_) {
+              main_runner_(*tts.main_runner_),
+              fx_(32, 0), cl_(32, std::numeric_limits<float>::quiet_NaN()) {
             temp_ = std::sqrt(tts.cfg_.temperature);
             flow_inputs_.reserve(4);
 
@@ -1826,8 +1807,8 @@ private:
         // Cached path: restore KV snapshot → text conditioning only
         LatentGen(PocketTTS& t, const Snapshot& voice_snap, const TensorI64& tid, int max, int eos_extra)
             : tts(t), max_(max), eos_extra_(eos_extra), m_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)),
-              fx_(32, 0), cl_(32, std::numeric_limits<float>::quiet_NaN()),
-              main_runner_(*tts.main_runner_) {
+              main_runner_(*tts.main_runner_),
+              fx_(32, 0), cl_(32, std::numeric_limits<float>::quiet_NaN()) {
             temp_ = std::sqrt(tts.cfg_.temperature);
             flow_inputs_.reserve(4);
 
