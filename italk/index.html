@@ -276,31 +276,14 @@
   }
 
   class StreamPlayer {
-    constructor({ onComplete, onCancel, sampleRate = null, numChannels = 1 }) {
+    constructor({ onComplete, onCancel, sampleRate = 24000 }) {
       this.audioContext = StreamPlayer.sharedContext();
-
-      // If sampleRate is provided, we assume raw PCM16 and skip header parsing
-      if (sampleRate) {
-        this.sampleRate = sampleRate;
-        this.numChannels = numChannels;
-        this.headerParsed = true;
-      } else {
-        this.sampleRate = 0;
-        this.numChannels = 0;
-        this.headerParsed = false;
-      }
-
-      this.headerBuffer = new Uint8Array(44);
-      this.headerBytesReceived = 0;
-      this.minBufferSize = 16384;
-      this.pcmData = new Uint8Array(0);
+      this.sampleRate = sampleRate;
       this.nextStartTime = 0;
-      this.pendingSources = 0;
-      this.streamEnded = false;
       this.stopped = false;
       this.onComplete = onComplete;
       this.onCancel = onCancel;
-      this._finishTimer = null;
+      this.activeSources = new Set();
     }
 
     static sharedContext() {
@@ -310,138 +293,51 @@
       return StreamPlayer._ctx;
     }
 
-    parseWavHeader(header) {
-      const view = new DataView(header.buffer);
-      const riff = String.fromCharCode(...header.slice(0, 4));
-      const wave = String.fromCharCode(...header.slice(8, 12));
-      if (riff !== "RIFF" || wave !== "WAVE") throw new Error("Invalid WAV");
-
-      this.numChannels = view.getUint16(22, true);
-      this.sampleRate = view.getUint32(24, true);
-      this.headerParsed = true;
-    }
-
-    appendPcmData(newData) {
-      const newBuffer = new Uint8Array(this.pcmData.length + newData.length);
-      newBuffer.set(this.pcmData);
-      newBuffer.set(newData, this.pcmData.length);
-      this.pcmData = newBuffer;
-    }
-
-    _maybeFinish() {
-      if (this.stopped) return;
-      if (!this.streamEnded) return;
-
-      if (this.headerParsed && this.numChannels > 0) {
-        const bytesPerFrame = this.numChannels * 2;
-        if (this.pcmData.length > 0 && this.pcmData.length < bytesPerFrame) {
-          this.pcmData = new Uint8Array(0);
-        }
-      }
-
-      if (this.pendingSources > 0) return;
-      if (this.pcmData.length > 0) return;
-
-      if (this._finishTimer) clearTimeout(this._finishTimer);
-      this._finishTimer = setTimeout(() => {
+    // Helper to check if we are buffered too far ahead
+    async waitIfBufferFull() {
+      // If we have scheduled more than x seconds of audio ahead of now,
+      // wait before pulling more from the network.
+      while (this.nextStartTime - this.audioContext.currentTime > 60) {
         if (this.stopped) return;
-        if (this.onComplete) this.onComplete();
-      }, 80);
-    }
-
-    async tryPlayBuffer() {
-      if (this.stopped) return;
-      // Ensure we have parsed header OR were initialized with a sampleRate
-      if (!this.headerParsed || this.pcmData.length < this.minBufferSize) return;
-
-      const bytesPerFrame = this.numChannels * 2;
-      const framesToPlay = Math.floor(this.pcmData.length / bytesPerFrame);
-      const bytesToPlay = framesToPlay * bytesPerFrame;
-      if (bytesToPlay <= 0) return;
-
-      const dataToPlay = this.pcmData.slice(0, bytesToPlay);
-      this.pcmData = this.pcmData.slice(bytesToPlay);
-
-      const audioBuffer = this.audioContext.createBuffer(
-        this.numChannels,
-        framesToPlay,
-        this.sampleRate
-      );
-
-      const int16Data = new Int16Array(
-        dataToPlay.buffer,
-        dataToPlay.byteOffset,
-        framesToPlay * this.numChannels
-      );
-
-      for (let ch = 0; ch < this.numChannels; ch++) {
-        const chData = audioBuffer.getChannelData(ch);
-        for (let i = 0; i < framesToPlay; i++) {
-          chData[i] = int16Data[i * this.numChannels + ch] / 32768;
-        }
+        await new Promise(r => setTimeout(r, 1000));
       }
-
-      const source = this.audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this.audioContext.destination);
-
-      const currentTime = this.audioContext.currentTime;
-      const startTime = Math.max(currentTime, this.nextStartTime);
-
-      this.pendingSources += 1;
-      source.onended = () => {
-        this.pendingSources = Math.max(0, this.pendingSources - 1);
-        this._maybeFinish();
-      };
-
-      source.start(startTime);
-      this.nextStartTime = startTime + audioBuffer.duration;
-
-      if (this.pcmData.length >= this.minBufferSize) {
-        setTimeout(() => this.tryPlayBuffer(), 10);
-      }
-      this._maybeFinish();
     }
 
     addChunk(chunk) {
       if (this.stopped) return;
 
-      if (this.headerParsed) {
-        this.appendPcmData(chunk);
-      } else {
-        const need = 44 - this.headerBytesReceived;
-        const toCopy = Math.min(need, chunk.length);
-        this.headerBuffer.set(chunk.slice(0, toCopy), this.headerBytesReceived);
-        this.headerBytesReceived += toCopy;
+      // Convert chunk (Uint8Array) to Float32 pcm immediately
+      // This avoids keeping raw bytes + floats in memory
+      const data16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
+      const floatData = new Float32Array(data16.length);
+      for (let i = 0; i < data16.length; i++) floatData[i] = data16[i] / 32768;
 
-        if (this.headerBytesReceived >= 44) {
-          this.parseWavHeader(this.headerBuffer);
-          if (chunk.length > toCopy) {
-            this.appendPcmData(chunk.slice(toCopy));
-          }
+      const audioBuffer = this.audioContext.createBuffer(1, floatData.length, this.sampleRate);
+      audioBuffer.getChannelData(0).set(floatData);
+
+      const source = this.audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.audioContext.destination);
+
+      const startTime = Math.max(this.audioContext.currentTime, this.nextStartTime);
+      source.start(startTime);
+
+      this.activeSources.add(source);
+      source.onended = () => {
+        this.activeSources.delete(source);
+        if (this.activeSources.size === 0 && this.streamEnded) {
+          this.onComplete?.();
         }
-      }
-      this.tryPlayBuffer();
-    }
+      };
 
-    endStream() {
-      this.streamEnded = true;
-      if (this.pcmData.length > 0) {
-        this.minBufferSize = 1;
-        this.tryPlayBuffer();
-      }
-      this._maybeFinish();
+      this.nextStartTime = startTime + audioBuffer.duration;
     }
 
     stop() {
-      if (this.stopped) return;
       this.stopped = true;
-      if (this._finishTimer) clearTimeout(this._finishTimer);
-      try {
-        this.audioContext.close();
-      } catch {}
-      StreamPlayer._ctx = null;
-      if (this.onCancel) this.onCancel();
+      this.activeSources.forEach(s => { try { s.stop(); } catch(e){} });
+      this.activeSources.clear();
+      this.onCancel?.();
     }
   }
 
@@ -1192,12 +1088,18 @@ async function addFavoriteFromText(textOverride) {
       state.player = new StreamPlayer({ onComplete, onCancel, sampleRate });
 
       const reader = res.body.getReader();
+
       while (true) {
+        await state.player.waitIfBufferFull();
+
         const { done, value } = await reader.read();
         if (done) break;
-        if (value && state.player) state.player.addChunk(value);
+
+        if (value && state.player) {
+          state.player.addChunk(value);
+        }
       }
-      if (state.player) state.player.endStream();
+      state.player.streamEnded = true;
     } catch (e) {
       if (e.name === "AbortError") return;
       console.error(e);

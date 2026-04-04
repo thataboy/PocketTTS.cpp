@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.28)
 project(pocket_tts VERSION 1.0.0 LANGUAGES CXX C)
 
 find_package(yaml-cpp REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -108,6 +109,7 @@ set(POCKET_COMMON_LINK_LIBS
     ${ONNXRUNTIME_LIB}
     sentencepiece-static
     yaml-cpp::yaml-cpp
+    nlohmann_json::nlohmann_json
 )
 
 function(configure_pocket_target target_name)
