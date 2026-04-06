@@ -1,7 +1,6 @@
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 3.5)
 project(pocket_tts VERSION 1.0.0 LANGUAGES CXX C)
 
-find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -20,6 +19,23 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 # =============================================================================
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
+
+include(FetchContent)
+
+FetchContent_Declare(
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG 0.8.0 # Or the version you prefer
+    EXCLUDE_FROM_ALL
+)
+
+# Force yaml-cpp to build as a static library
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(yaml-cpp)
 
 # ONNX Runtime (pre-built) - https://github.com/microsoft/onnxruntime/releases
 set(ONNXRUNTIME_VERSION "1.23.2")
@@ -108,7 +124,7 @@ set(POCKET_COMMON_INCLUDE_DIRS
 set(POCKET_COMMON_LINK_LIBS
     ${ONNXRUNTIME_LIB}
     sentencepiece-static
-    yaml-cpp::yaml-cpp
+    yaml-cpp
     nlohmann_json::nlohmann_json
 )
 
@@ -138,6 +154,7 @@ endfunction()
 # executable
 add_executable(ptts ptts.cpp)
 configure_pocket_target(ptts)
+target_precompile_headers(ptts PRIVATE <nlohmann/json.hpp>)
 
 if (MSVC)
     target_compile_options(ptts PRIVATE /W4 /WX)
@@ -150,7 +167,7 @@ endif ()
 if(BUILD_SHARED_LIB)
     add_library(pocket-tts-lib SHARED ptts_engine.cpp)
     set_target_properties(pocket-tts-lib PROPERTIES
-        OUTPUT_NAME "pocket_tts"
+        OUTPUT_NAME "ptts"
         BUILD_RPATH "$ORIGIN"
         INSTALL_RPATH "$ORIGIN"
         BUILD_WITH_INSTALL_RPATH TRUE
@@ -167,7 +184,6 @@ if(BUILD_SHARED_LIB)
     target_link_directories(pocket-tts-lib PRIVATE ${ONNXRUNTIME_ROOT}/lib)
 
     target_include_directories(pocket-tts-lib PRIVATE ${POCKET_COMMON_INCLUDE_DIRS})
-    target_link_libraries(pocket-tts-lib PRIVATE yaml-cpp::yaml-cpp)
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(pocket-tts-lib PRIVATE pthread dl)
