@@ -132,9 +132,9 @@ YAML::Node italk_default_state() const {
     root["tags"].push_back(make_tag("tag_hand", "HAND", "Have a nice day", now));
     root["tags"].push_back(make_tag("tag_bye", "Bye", "Bye", now));
 
-    root["favorites"]["categories"]["Intro"] = YAML::Node(YAML::NodeType::Sequence);
-    root["favorites"]["categories"]["Contact"] = YAML::Node(YAML::NodeType::Sequence);
-    root["favorites"]["categories"]["Insurance"] = YAML::Node(YAML::NodeType::Sequence);
+    root["favorites"]["categories"]["Intro"] = YAML::Node();
+    root["favorites"]["categories"]["Contact"] = YAML::Node();
+    root["favorites"]["categories"]["Insurance"] = YAML::Node();
 
     root["last_session"]["name"] = "";
     root["last_session"]["started_at"] = now;
@@ -241,9 +241,13 @@ static bool erase_favorite_by_id(YAML::Node cats, const std::string& cat, const 
             removed = true;
             continue;
         }
-        new_items.push_back(item);
+        // Deep copy the item into the new sequence
+        new_items.push_back(YAML::Clone(item));
     }
-    if (removed) cats[cat] = new_items;
+    if (removed)
+        // if category is now empty create new empty node
+        // otherwise we end up with [] in yaml file
+        cats[cat] = new_items.size() > 0 ? new_items : YAML::Node();
     return removed;
 }
 
@@ -537,7 +541,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
         YAML::Node data = italk_load();
         YAML::Node cats = data["favorites"]["categories"];
 
-        if (!cats[from_cat] || !cats[to_cat] || !cats[from_cat].IsSequence() || !cats[to_cat].IsSequence()) {
+        if (!cats[from_cat] || !cats[to_cat]) {
             return send_json_error(client_fd, 400, "Category not found"), true;
         }
 
@@ -568,8 +572,8 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
         YAML::Node new_to(YAML::NodeType::Sequence);
         for (auto& v : to_vec) new_to.push_back(v);
 
-        cats[from_cat] = new_from;
-        cats[to_cat] = new_to;
+        cats[from_cat] = new_from.size() > 0 ? new_from : YAML::Node();
+        cats[to_cat] = new_to.size() > 0 ? new_to : YAML::Node();
 
         italk_save(data);
         return send_json_ok(client_fd), true;

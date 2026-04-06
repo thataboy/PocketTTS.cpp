@@ -843,7 +843,9 @@ async function addFavoriteFromText(textOverride) {
             const toIdx = evt.newIndex;
 
             if (fromCat === toCat && fromIdx === toIdx) return;
-
+            // Ensure the state entries are arrays to prevent null pointer throws
+            state.favorites.categories[fromCat] ||= [];
+            state.favorites.categories[toCat] ||= [];
             try {
               await jsonFetch(API.reorderFav, "POST", { from_cat: fromCat, to_cat: toCat, from: fromIdx, to: toIdx });
               // Sync local state and re-render to ensure UI consistency
