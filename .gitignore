@@ -48,3 +48,4 @@ models/.cache/
 .DS_Store
 
 italk.yaml
+italk.json

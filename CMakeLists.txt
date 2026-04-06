@@ -11,6 +11,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+#set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -march=native -flto")
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 
@@ -19,23 +21,6 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 # =============================================================================
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
-
-include(FetchContent)
-
-FetchContent_Declare(
-    yaml-cpp
-    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-    GIT_TAG 0.8.0 # Or the version you prefer
-    EXCLUDE_FROM_ALL
-)
-
-# Force yaml-cpp to build as a static library
-set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(yaml-cpp)
 
 # ONNX Runtime (pre-built) - https://github.com/microsoft/onnxruntime/releases
 set(ONNXRUNTIME_VERSION "1.23.2")
@@ -124,7 +109,6 @@ set(POCKET_COMMON_INCLUDE_DIRS
 set(POCKET_COMMON_LINK_LIBS
     ${ONNXRUNTIME_LIB}
     sentencepiece-static
-    yaml-cpp
     nlohmann_json::nlohmann_json
 )
 

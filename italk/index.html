@@ -47,7 +47,7 @@
       </div>
     </div>
 
-    <div id="tab-chat" class="tabPanel pt-2 space-y-2">
+    <div id="tab-chat" class="tabPanel hidden pt-2 space-y-2">
       <div class="bg-slate-800 border border-slate-700 rounded p-2">
         <textarea id="textInput" rows="4" class="w-full bg-transparent outline-none resize-none text-base" placeholder="Enter text to speak"></textarea>
         <div class="pt-1 text-[11px] text-slate-400 flex items-center justify-between">
@@ -167,6 +167,7 @@
   const API = {
     state: "/italk/state",
     setVoice: "/italk/settings/voice",
+    setTab: "/italk/settings/tab",
     setFavCategory: "/italk/settings/fav_category",
     setExpandedCats: "/italk/settings/expanded_categories",
     addTag: "/italk/tags",
@@ -391,11 +392,13 @@
     state.favoriteExpanded = new Set(data.settings?.expanded_fav_categories || []);
     state.last_session = data.last_session || { name: "", lines: [] };
     state.history = data.history || [];
-    if (data.settings && data.settings.last_voice) $("voiceSelect").value = data.settings.last_voice;
-    if (data.settings && data.settings.last_fav_category) state.lastFavCategory = data.settings.last_fav_category;
+    if (data.settings?.last_voice) $("voiceSelect").value = data.settings.last_voice;
+    if (data.settings?.last_fav_category) state.lastFavCategory = data.settings.last_fav_category;
     $("sessionName").value = state.last_session.name || "";
     renderAll();
+    updateCharCount();
     updateValidation();
+    setTab(data.settings?.last_tab);
   }
 
   function renderAll() {
@@ -417,12 +420,13 @@
     }
   }
 
-  function setTab(name) {
+  async function setTab(tab) {
+    tab ||= "chat";
     ["chat","favorites","history"].forEach(t => {
-      $("tab-" + t).classList.toggle("hidden", t !== name);
+      $("tab-" + t).classList.toggle("hidden", t !== tab);
     });
     document.querySelectorAll(".tabBtn").forEach(btn => {
-      const active = btn.dataset.tab === name;
+      const active = btn.dataset.tab === tab;
       btn.classList.toggle("bg-indigo-700", active);
       btn.classList.toggle("border-indigo-500", active);
       btn.classList.toggle("text-white", active);
@@ -431,6 +435,7 @@
       btn.classList.toggle("border-slate-600", !active);
       btn.classList.toggle("text-slate-200", !active);
     });
+    try { await jsonFetch(API.setTab, "POST", { tab }); } catch {}
   }
 
   document.querySelectorAll(".tabBtn").forEach(btn => btn.addEventListener("click", () => setTab(btn.dataset.tab)));
@@ -843,9 +848,6 @@ async function addFavoriteFromText(textOverride) {
             const toIdx = evt.newIndex;
 
             if (fromCat === toCat && fromIdx === toIdx) return;
-            // Ensure the state entries are arrays to prevent null pointer throws
-            state.favorites.categories[fromCat] ||= [];
-            state.favorites.categories[toCat] ||= [];
             try {
               await jsonFetch(API.reorderFav, "POST", { from_cat: fromCat, to_cat: toCat, from: fromIdx, to: toIdx });
               // Sync local state and re-render to ensure UI consistency
@@ -1235,11 +1237,8 @@ async function addFavoriteFromText(textOverride) {
   });
 
   window.addEventListener("load", async () => {
-    setTab("chat");
     await loadVoices();
     await loadState();
-    updateCharCount();
-    updateValidation();
   });
 </script>
 </body>

@@ -40,7 +40,6 @@
 #include <filesystem>
 #include <random>
 #include <sstream>
-#include <yaml-cpp/yaml.h>
 #include <nlohmann/json.hpp>
 using json = nlohmann::ordered_json;
 
@@ -187,8 +186,6 @@ class TTSServer {
         {"/italk", "./italk"},
         {"/", "/Volumes/T7/downloads"},
     };
-
-    #include "italk.hpp"
 
     void scan_voices() {
         voice_names_.clear();
@@ -351,6 +348,18 @@ private:
         return ptt_send(fd, header.c_str(), header.size()) && ptt_send(fd, data, len);
     }
 
+    bool send_json_ok(ptt_socket_t fd) {
+        json j;
+        j["ok"] = true;
+        return send_response(fd, 200, "application/json", j.dump());
+    }
+
+    bool send_json_error(ptt_socket_t fd, int status, const std::string& msg) {
+        json j;
+        j["error"] = msg;
+        return send_response(fd, status, "application/json", j.dump());
+    }
+
     void render_dir_list(
         ptt_socket_t client_fd,
         const std::string& decoded_path,
@@ -420,6 +429,8 @@ private:
         return false;
 #endif
     }
+
+    #include "italk.hpp"
 
     void handle_request(int client_fd) {
         HttpRequest req = HttpRequest::parse(client_fd);
