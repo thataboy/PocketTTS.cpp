@@ -807,18 +807,13 @@ async function addFavoriteFromText(textOverride) {
       const catToggle = iconButton({
         title: catExpanded ? "Collapse" : "Expand",
         noBorder: true,
-        svg: catExpanded ? `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg>` : `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>`,
+        svg: catExpanded
+          ? `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>`
+          : `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 15 6-6 6 6"/></svg>`,
         onClick: () => toggleCategory(cat)
-      });
-      const catAdd = iconButton({
-        title: "Add Favorite",
-        noBorder: true,
-        svg: `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>`,
-        onClick: () => addFavoriteFromText("", cat)
       });
 
       catHeader.appendChild(catLeft);
-      catHeader.appendChild(catAdd);
       catHeader.appendChild(catToggle);
       section.appendChild(catHeader);
 
@@ -916,8 +911,8 @@ async function addFavoriteFromText(textOverride) {
         title: expanded ? "Collapse" : "Expand",
         noBorder: true,
         svg: expanded
-          ? `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 15 6-6 6 6"/></svg>`
-          : `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>`,
+          ? `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>`
+          : `<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 15 6-6 6 6"/></svg>`,
         onClick: () => {
           if (state.historyExpanded.has(sess.id)) {
             state.historyExpanded.clear();

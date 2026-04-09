@@ -1,6 +1,9 @@
 // ---------------- iTalk state ----------------
 std::mutex italk_mutex_;
-std::filesystem::path italk_data_path_ = std::filesystem::current_path() / "italk.json";
+std::filesystem::path italk_data_path_ = []() {
+    const char* home = std::getenv("HOME");
+    return home ? std::filesystem::path(home) : std::filesystem::current_path();
+}() / "italk.json";
 
 // ---------------- Helpers ----------------
 static std::string trim_copy(const std::string& s) {
@@ -190,31 +193,26 @@ void italk_save(const json& data) {
     std::filesystem::rename(tmp, italk_data_path_);
 }
 
-static std::pair<std::string, json> italk_find_fav(const json& data, const std::string& fav_id) {
-    if (!data.contains("favorites") || !data["favorites"].contains("categories")) return {"", nullptr};
-    const auto& cats = data["favorites"]["categories"];
+static std::pair<std::string, json*> italk_find_fav(json& data, const std::string& fav_id) {
+    auto& cats = data["favorites"]["categories"];
 
     for (auto& [cat_name, items] : cats.items()) {
         if (!items.is_array()) continue;
-        for (const auto& fav : items) {
+        for (auto& fav : items) {
             if (fav.contains("id") && fav["id"] == fav_id) {
-                return {cat_name, fav};
+                return {cat_name, &fav};
             }
         }
     }
     return {"", nullptr};
 }
 
-static bool erase_favorite_by_id(json& cats, const std::string& cat, const std::string& fav_id) {
-    if (!cats.contains(cat) || !cats[cat].is_array()) return false;
-
-    auto& items = cats[cat];
-    auto it = std::remove_if(items.begin(), items.end(), [&](const json& item) {
-        return item.contains("id") && item["id"] == fav_id;
+static bool erase_by_id(json& items, const std::string& id) {
+    auto it = std::find_if(items.begin(), items.end(), [&](const json& j) {
+        return j.contains("id") && j["id"] == id;
     });
-
     if (it != items.end()) {
-        items.erase(it, items.end());
+        items.erase(it);
         return true;
     }
     return false;
@@ -306,6 +304,12 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
         return send_json_ok(client_fd), true;
     }
 
+    auto send_id = [&](const std::string& id) {
+        json j;
+        j["id"] = id;
+        return send_response(client_fd, 200, "application/json", j.dump());
+    };
+
     // POST /italk/tags
     if (req.method == "POST" && subpath == "/tags") {
         std::string label = trim_copy(body_json.value("label", ""));
@@ -323,7 +327,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
             italk_now_iso()
         ));
         italk_save(data);
-        return send_response(client_fd, 200, "application/json", json({{"id", tag_id}}).dump()), true;
+        return send_id(tag_id), true;
     }
 
     // PUT /italk/tags/{tag_id}
@@ -355,12 +359,8 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
             std::lock_guard<std::mutex> lock(italk_mutex_);
             json data = italk_load();
-            auto& tags = data["tags"];
-            tags.erase(std::remove_if(tags.begin(), tags.end(), [&](const json& t) {
-                return t["id"] == tag_id;
-            }), tags.end());
-
-            italk_save(data);
+            if (erase_by_id(data["tags"], tag_id))
+                italk_save(data);
             return send_json_ok(client_fd), true;
         }
     }
@@ -406,7 +406,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
         cats[category].push_back(make_favorite(fav_id, text, now, now));
         italk_save(data);
-        return send_response(client_fd, 200, "application/json", json({{"id", fav_id}}).dump()), true;
+        return send_id(fav_id), true;
     }
 
     // PUT /italk/favorites/{fav_id}
@@ -414,26 +414,17 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
         auto parts = split_path(subpath);
         if (parts.size() == 2 && parts[0] == "favorites") {
             std::string fav_id = parts[1];
-            std::string category = trim_copy(body_json.value("category", "Unsorted"));
-            if (category.empty()) category = "Unsorted";
+            std::string category = trim_copy(body_json.value("category", ""));
+            if (category.empty()) return send_json_error(client_fd, 404, "category empty"), true;
             std::string text = trim_copy(body_json.value("text", ""));
 
             std::lock_guard<std::mutex> lock(italk_mutex_);
             json data = italk_load();
 
-            auto [old_cat, fav] = italk_find_fav(data, fav_id);
-            if (fav.is_null()) return send_json_error(client_fd, 404, "favorite not found"), true;
-
-            json updated = fav;
-            if (!text.empty()) updated["text"] = text;
-            updated["updated_at"] = italk_now_iso();
-
-            erase_favorite_by_id(data["favorites"]["categories"], old_cat, fav_id);
-
-            auto& cats = data["favorites"]["categories"];
-            if (!cats.contains(category) || !cats[category].is_array()) cats[category] = json::array();
-            cats[category].push_back(updated);
-
+            auto [_, fav] = italk_find_fav(data, fav_id);
+            if (fav == nullptr) return send_json_error(client_fd, 404, "favorite not found"), true;
+            (*fav)["text"] = text;
+            (*fav)["updated_at"] = italk_now_iso();
             italk_save(data);
             return send_json_ok(client_fd), true;
         }
@@ -446,11 +437,9 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
             std::string fav_id = parts[1];
             std::lock_guard<std::mutex> lock(italk_mutex_);
             json data = italk_load();
-            auto [cat, fav] = italk_find_fav(data, fav_id);
-            if (!cat.empty()) {
-                erase_favorite_by_id(data["favorites"]["categories"], cat, fav_id);
+            auto [cat, _] = italk_find_fav(data, fav_id);
+            if (!cat.empty() && erase_by_id(data["favorites"]["categories"][cat], fav_id))
                 italk_save(data);
-            }
             return send_json_ok(client_fd), true;
         }
     }
@@ -497,20 +486,13 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
         auto& lines = data["last_session"]["lines"];
-
-        json new_lines = json::array();
-        new_lines.push_back(make_session_line(line_id, text, italk_now_iso()));
-
-        for (auto& line : lines) {
-            std::string old_text = line.value("text", "");
-            if (normalize_spaces_lower(old_text) != norm) {
-                new_lines.push_back(line);
-            }
-        }
-
-        data["last_session"]["lines"] = new_lines;
+        auto it = std::find_if(lines.begin(), lines.end(), [&](const json& j) {
+            return normalize_spaces_lower(j.value("text", "")) == norm;
+        });
+        if (it != lines.end()) lines.erase(it);
+        lines.insert(lines.begin(), make_session_line(line_id, text, italk_now_iso()));
         italk_save(data);
-        return send_response(client_fd, 200, "application/json", json({{"id", line_id}}).dump()), true;
+        return send_id(line_id), true;
     }
 
     // POST /italk/session/delete_line
@@ -520,13 +502,8 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
-        auto& lines = data["last_session"]["lines"];
-        size_t before = lines.size();
-        lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const json& l) {
-            return l["id"] == line_id;
-        }), lines.end());
-
-        if (lines.size() != before) italk_save(data);
+        if (erase_by_id(data["last_session"]["lines"], line_id))
+            italk_save(data);
         return send_json_ok(client_fd), true;
     }
 
@@ -538,21 +515,15 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
-        bool changed = false;
 
         for (auto& sess : data["history"]) {
             if (sess["id"] == session_id) {
-                auto& lines = sess["lines"];
-                size_t before = lines.size();
-                lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const json& l) {
-                    return l["id"] == line_id;
-                }), lines.end());
-                if (lines.size() != before) changed = true;
+                if (erase_by_id(sess["lines"], line_id))
+                    italk_save(data);
                 break;
             }
         }
 
-        if (changed) italk_save(data);
         return send_json_ok(client_fd), true;
     }
 
@@ -579,14 +550,14 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
     // POST /italk/session/save
     if (req.method == "POST" && subpath == "/session/save") {
-        std::string name = trim_copy(body_json.value("name", ""));
+        std::string name = trim_copy(body_json.value("name", "Untitled"));
         std::string sess_id;
 
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
         auto& last = data["last_session"];
 
-        if (!name.empty()) last["name"] = name;
+        last["name"] = name;
 
         if (last["lines"].is_array() && !last["lines"].empty()) {
             sess_id = "sess_" + random_hex(8);
@@ -600,19 +571,16 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
             data["history"].insert(data["history"].begin(), hist_item);
             italk_save(data);
         }
-        return send_response(client_fd, 200, "application/json", json({{"id", sess_id}}).dump()), true;
+        return send_id(sess_id), true;
     }
 
     // POST /italk/history/delete
     if (req.method == "POST" && subpath == "/history/delete") {
-        std::string id = trim_copy(body_json.value("id", ""));
+        std::string history_id = trim_copy(body_json.value("id", ""));
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
-        auto& history = data["history"];
-        history.erase(std::remove_if(history.begin(), history.end(), [&](const json& h) {
-            return h["id"] == id;
-        }), history.end());
-        italk_save(data);
+        if (erase_by_id(data["history"], history_id))
+            italk_save(data);
         return send_json_ok(client_fd), true;
     }
 

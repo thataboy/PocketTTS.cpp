@@ -138,6 +138,7 @@ struct Config {
     int eos_extra_frames = -1;  // -1 = auto-calculate from text length
     bool verbose = false;
     bool voice_cache = true;
+    bool refresh_cache = false;
 };
 
 struct AudioData {
@@ -474,7 +475,7 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
 }
 
 // compute frames_after_eos.
-static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
+static int calc_eos_extra(const std::string& text, int cfg_eos_extra, bool log) {
 
     auto count_words = [&](const std::string& text, int max=INT_MAX) {
         int count = 0;
@@ -489,7 +490,7 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
         return count;
     };
 
-    int nwords = count_words(text, 5);
+    int nwords = count_words(text, log ? INT_MAX : 5);
     uint64_t val = rng::next();
     int eos_extra = cfg_eos_extra;
     if (eos_extra < 0) {
@@ -504,7 +505,7 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra) {
         }
     }
 
-    std::cout << /*nwords << "|" << */ eos_extra << "↗️" << text << "↖️\n";
+    if (log) std::cout << nwords << "|" << eos_extra << "↗️" << text << "↖️\n";
     return eos_extra;
 }
 
@@ -2046,11 +2047,12 @@ void PocketTTS::stream(const std::string& text, const std::string& voice, Stream
 void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames) {
     auto sentences = split_sentences(text);
     if (sentences.empty()) sentences.push_back("     .");
+    bool log = sentences.size() > 1;
 
     for (size_t si = 0; si < sentences.size(); ++si) {
         auto& prepared = sentences[si];
         if (prepared.empty()) continue;
-        auto eos_extra = calc_eos_extra(prepared, cfg_.eos_extra_frames);
+        auto eos_extra = calc_eos_extra(prepared, cfg_.eos_extra_frames, log);
         auto gen = make_gen(voice, tokenize(prepared), max_frames, eos_extra);
         dec_runner_->reset_state();  // zero existing buffers, no reallocation
 
