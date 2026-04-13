@@ -344,7 +344,7 @@
 
   const state = {
     tags: [],
-    favorites: { categories: {} },
+    favorites: {},
     last_session: { name: "", lines: [] },
     history: [],
     historyExpanded: new Set(),
@@ -387,7 +387,7 @@
     const r = await fetch(API.state);
     const data = await r.json();
     state.tags = data.tags || [];
-    state.favorites = data.favorites || { categories: {} };
+    state.favorites = data.favorites || {};
     // Load expanded categories from server settings
     state.favoriteExpanded = new Set(data.settings?.expanded_fav_categories || []);
     state.last_session = data.last_session || { name: "", lines: [] };
@@ -651,9 +651,9 @@ async function addFavoriteFromText(textOverride) {
       const id = state.editingFavoriteId;
 
       try {
-        await jsonFetch(API.updateFav(id), "PUT", { category: cat, text: full });
+        await jsonFetch(API.updateFav(id), "PUT", { text: full });
 
-        const cats = state.favorites.categories;
+        const cats = state.favorites;
         const list = cats[cat] || [];
         const idx = list.findIndex(f => f.id === id);
 
@@ -681,7 +681,7 @@ async function addFavoriteFromText(textOverride) {
     }
 
     // --- MODAL PROMPT (NEW FAVORITE MODE) ---
-    const categories = Object.keys(state.favorites.categories || {});
+    const categories = Object.keys(state.favorites || {});
     const node = document.createElement("div");
     node.className = "space-y-3";
 
@@ -725,8 +725,8 @@ async function addFavoriteFromText(textOverride) {
         if (!text) return false;
 
         const res = await jsonFetch(API.addFav, "POST", { category: cat, text });
-        state.favorites.categories[cat] = state.favorites.categories[cat] || [];
-        state.favorites.categories[cat].push({ id: res.id, text });
+        state.favorites[cat] = state.favorites[cat] || [];
+        state.favorites[cat].push({ id: res.id, text });
         toast("Favorite saved");
         renderFavorites();
       }
@@ -745,7 +745,7 @@ async function addFavoriteFromText(textOverride) {
       cancelText: "Keep",
       onOk: async () => {
         await fetch(API.deleteFav(favId), { method: "DELETE" });
-        const cats = state.favorites.categories;
+        const cats = state.favorites;
         Object.keys(cats).forEach(cat => cats[cat] = (cats[cat] || []).filter(f => f.id !== favId));
         renderFavorites();
         toast("Favorite deleted");
@@ -755,7 +755,7 @@ async function addFavoriteFromText(textOverride) {
   }
 
   function findFavoriteById(favId) {
-    const cats = state.favorites?.categories || {};
+    const cats = state.favorites || {};
     for (const k of Object.keys(cats)) {
       const hit = (cats[k] || []).find(f => f.id === favId);
       if (hit) return hit;
@@ -783,14 +783,13 @@ async function addFavoriteFromText(textOverride) {
   function renderFavorites() {
     const root = $("favoritesList");
     root.innerHTML = "";
-    const cats = state.favorites.categories || {};
+    const cats = state.favorites || {};
     const catNames = Object.keys(cats);
 
     if (catNames.length === 0) {
       root.innerHTML = `<div class="text-sm text-slate-400">No favorites yet.</div>`;
       return;
     }
-
     catNames.forEach(cat => {
       const section = document.createElement("div");
       section.className = "space-y-2 pb-2";
@@ -846,8 +845,8 @@ async function addFavoriteFromText(textOverride) {
             try {
               await jsonFetch(API.reorderFav, "POST", { from_cat: fromCat, to_cat: toCat, from: fromIdx, to: toIdx });
               // Sync local state and re-render to ensure UI consistency
-              const item = state.favorites.categories[fromCat].splice(fromIdx, 1)[0];
-              state.favorites.categories[toCat].splice(toIdx, 0, item);
+              const item = state.favorites[fromCat].splice(fromIdx, 1)[0];
+              state.favorites[toCat].splice(toIdx, 0, item);
               renderFavorites();
             } catch (e) {
               toast("Reorder failed");

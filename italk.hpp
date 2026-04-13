@@ -105,7 +105,7 @@ json italk_default_state() {
     const std::string now = italk_now_iso();
 
     json root = json::object();
-    root["meta"]["version"] = 1;
+    root["meta"]["version"] = 1.1;
     root["meta"]["created_at"] = now;
 
     root["settings"]["last_voice"] = "";
@@ -123,9 +123,9 @@ json italk_default_state() {
         make_tag("tag_bye", "Bye", "Bye", now)
     });
 
-    root["favorites"]["categories"]["Intro"] = json::array();
-    root["favorites"]["categories"]["Contact"] = json::array();
-    root["favorites"]["categories"]["Insurance"] = json::array();
+    root["favorites"]["Intro"] = json::array();
+    root["favorites"]["Contact"] = json::array();
+    root["favorites"]["Insurance"] = json::array();
 
     root["last_session"]["name"] = "";
     root["last_session"]["started_at"] = now;
@@ -164,9 +164,6 @@ json italk_load() {
     if (!data.contains("tags") || !data["tags"].is_array()) data["tags"] = def["tags"];
 
     if (!data.contains("favorites") || !data["favorites"].is_object()) data["favorites"] = def["favorites"];
-    if (!data["favorites"].contains("categories") || !data["favorites"]["categories"].is_object()) {
-        data["favorites"]["categories"] = def["favorites"]["categories"];
-    }
 
     if (!data.contains("last_session") || !data["last_session"].is_object()) data["last_session"] = def["last_session"];
     if (!data["last_session"].contains("name")) data["last_session"]["name"] = "";
@@ -193,19 +190,20 @@ void italk_save(const json& data) {
     std::filesystem::rename(tmp, italk_data_path_);
 }
 
-static std::pair<std::string, json*> italk_find_fav(json& data, const std::string& fav_id) {
-    auto& cats = data["favorites"]["categories"];
+static std::pair<json*, json::iterator> italk_find_fav(json& data, const std::string& fav_id) {
+    auto& favorites = data["favorites"];
 
-    for (auto& [cat_name, items] : cats.items()) {
-        if (!items.is_array()) continue;
-        for (auto& fav : items) {
-            if (fav.contains("id") && fav["id"] == fav_id) {
-                return {cat_name, &fav};
+    for (auto& cat : favorites) {
+        if (!cat.is_array()) continue;
+        for (auto it = cat.begin(); it != cat.end(); ++it) {
+            if (it->contains("id") && (*it)["id"] == fav_id) {
+                return {&cat, it};
             }
         }
     }
-    return {"", nullptr};
+    return {nullptr, json::iterator()};
 }
+
 
 static bool erase_by_id(json& items, const std::string& id) {
     auto it = std::find_if(items.begin(), items.end(), [&](const json& j) {
@@ -333,7 +331,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
     // PUT /italk/tags/{tag_id}
     if (req.method == "PUT" && starts_with(subpath, "/tags/")) {
         auto parts = split_path(subpath);
-        if (parts.size() == 2 && parts[0] == "tags") {
+        if (parts.size() == 2) {
             std::string tag_id = parts[1];
             std::string label = trim_copy(body_json.value("label", ""));
             std::string text = trim_copy(body_json.value("text", ""));
@@ -354,7 +352,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
     // DELETE /italk/tags/{tag_id}
     if (req.method == "DELETE" && starts_with(subpath, "/tags/")) {
         auto parts = split_path(subpath);
-        if (parts.size() == 2 && parts[0] == "tags") {
+        if (parts.size() == 2) {
             std::string tag_id = parts[1];
 
             std::lock_guard<std::mutex> lock(italk_mutex_);
@@ -399,7 +397,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
-        auto& cats = data["favorites"]["categories"];
+        auto& cats = data["favorites"];
         if (!cats.contains(category) || !cats[category].is_array()) {
             cats[category] = json::array();
         }
@@ -412,17 +410,15 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
     // PUT /italk/favorites/{fav_id}
     if (req.method == "PUT" && starts_with(subpath, "/favorites/")) {
         auto parts = split_path(subpath);
-        if (parts.size() == 2 && parts[0] == "favorites") {
+        if (parts.size() == 2) {
             std::string fav_id = parts[1];
-            std::string category = trim_copy(body_json.value("category", ""));
-            if (category.empty()) return send_json_error(client_fd, 404, "category empty"), true;
             std::string text = trim_copy(body_json.value("text", ""));
 
             std::lock_guard<std::mutex> lock(italk_mutex_);
             json data = italk_load();
 
-            auto [_, fav] = italk_find_fav(data, fav_id);
-            if (fav == nullptr) return send_json_error(client_fd, 404, "favorite not found"), true;
+            auto [cat, fav] = italk_find_fav(data, fav_id);
+            if (cat == nullptr) return send_json_error(client_fd, 404, "favorite not found"), true;
             (*fav)["text"] = text;
             (*fav)["updated_at"] = italk_now_iso();
             italk_save(data);
@@ -433,13 +429,15 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
     // DELETE /italk/favorites/{fav_id}
     if (req.method == "DELETE" && starts_with(subpath, "/favorites/")) {
         auto parts = split_path(subpath);
-        if (parts.size() == 2 && parts[0] == "favorites") {
+        if (parts.size() == 2) {
             std::string fav_id = parts[1];
             std::lock_guard<std::mutex> lock(italk_mutex_);
             json data = italk_load();
-            auto [cat, _] = italk_find_fav(data, fav_id);
-            if (!cat.empty() && erase_by_id(data["favorites"]["categories"][cat], fav_id))
+            auto [cat, fav] = italk_find_fav(data, fav_id);
+            if (cat != nullptr) {
+                cat->erase(fav);
                 italk_save(data);
+            }
             return send_json_ok(client_fd), true;
         }
     }
@@ -453,7 +451,7 @@ bool handle_italk_request(ptt_socket_t client_fd, const HttpRequest& req) {
 
         std::lock_guard<std::mutex> lock(italk_mutex_);
         json data = italk_load();
-        auto& cats = data["favorites"]["categories"];
+        auto& cats = data["favorites"];
 
         if (!cats.contains(from_cat) || !cats.contains(to_cat)) {
             return send_json_error(client_fd, 400, "Category not found"), true;
