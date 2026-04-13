@@ -467,12 +467,14 @@ private:
 
                 {
                     std::lock_guard<std::mutex> lock(tts_mutex_);
-                    tts_.stream(text, voice, [&](const float* s, size_t n) {
+                    tts_.stream(text, voice, [&](const float* samples, size_t n) {
                         std::vector<int16_t> pcm(n);
                         for (size_t i = 0; i < n; ++i) {
-                            pcm[i] = static_cast<int16_t>(std::max(-1.0f, std::min(1.0f, s[i])) * 32767.0f);
+                            pcm[i] = static_cast<int16_t>
+                                (std::max(-1.0f, std::min(1.0f, samples[i])) * 32767.0f);
                         }
-                        if (!is_socket_alive(client_fd) || !send_chunk(client_fd, pcm.data(), n * 2)) {
+                        if (!is_socket_alive(client_fd)
+                            || !send_chunk(client_fd, pcm.data(), n * 2)) {
                             client_disconnected = true;
                             return false;
                         }
