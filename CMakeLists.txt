@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 project(pocket_tts VERSION 1.0.0 LANGUAGES CXX C)
 
-find_package(nlohmann_json REQUIRED)
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -10,8 +8,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
-
-#set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -march=native -flto")
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -23,9 +19,21 @@ include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
 # ONNX Runtime (pre-built) - https://github.com/microsoft/onnxruntime/releases
-set(ONNXRUNTIME_VERSION "1.23.2")
+set(ONNXRUNTIME_VERSION "1.25.0")
+if(ANDROID)
+    message(STATUS "Configuring for Android Target")
+    set(CMAKE_CXX_FLAGS_RELEASE "-funroll-loops -march=armv8-a+crypto+simd -mtune=cortex-a73 -Ofast")
+    #set(CMAKE_CXX_FLAGS_RELEASE "-O3 -funroll-loops -march=armv8a")
+    #set(CMAKE_C_FLAGS_RELEASE "-O3 -funroll-loops -march=armv8a")
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(onnx_imported SHARED IMPORTED)
+
+    set_target_properties(onnx_imported PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/../onnxruntime-android/libonnxruntime.so"
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/../onnxruntime-android/headers"
+    )
+    set(ONNXRUNTIME_LIB onnx_imported)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
         set(ONNXRUNTIME_ARCH "x64")
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
@@ -33,10 +41,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
     set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${ONNXRUNTIME_ARCH}-${ONNXRUNTIME_VERSION}.tgz")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-osx-universal2-${ONNXRUNTIME_VERSION}.tgz")
+    set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz")
+    set(CMAKE_CXX_FLAGS_RELEASE "-funroll-loops -O3 -ffp-contract=fast -march=native")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-${ONNXRUNTIME_VERSION}.zip")
 endif()
+
+if(NOT ANDROID)
 
 FetchContent_Declare(onnxruntime
     URL ${ONNXRUNTIME_URL}
@@ -52,6 +63,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/libonnxruntime.dylib)
 else()
     set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so)
+endif()
+
 endif()
 
 # SentencePiece (static library only) - https://github.com/google/sentencepiece/releases
@@ -109,12 +122,14 @@ set(POCKET_COMMON_INCLUDE_DIRS
 set(POCKET_COMMON_LINK_LIBS
     ${ONNXRUNTIME_LIB}
     sentencepiece-static
-    nlohmann_json::nlohmann_json
 )
 
 function(configure_pocket_target target_name)
     target_include_directories(${target_name} PRIVATE ${POCKET_COMMON_INCLUDE_DIRS})
     target_link_libraries(${target_name} PRIVATE ${POCKET_COMMON_LINK_LIBS})
+    if(ANDROID)
+        target_link_libraries(${target_name} PRIVATE log)
+    endif()
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(${target_name} PRIVATE pthread dl)
@@ -128,7 +143,7 @@ function(configure_pocket_target target_name)
                 ${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll
                 $<TARGET_FILE_DIR:${target_name}>
         )
-    else()
+    elseif(NOT ANDROID)
         add_custom_command(TARGET ${target_name} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:${target_name}>
         )
@@ -138,7 +153,7 @@ endfunction()
 # executable
 add_executable(ptts ptts.cpp)
 configure_pocket_target(ptts)
-target_precompile_headers(ptts PRIVATE <nlohmann/json.hpp>)
+target_precompile_headers(ptts PRIVATE "json.hpp")
 
 if (MSVC)
     target_compile_options(ptts PRIVATE /W4 /WX)
@@ -162,12 +177,17 @@ if(BUILD_SHARED_LIB)
     # Link against the unversioned .so directly and override the SONAME dependency
     # so it looks for libonnxruntime.so (what we ship) not libonnxruntime.so.1
     target_link_libraries(pocket-tts-lib PRIVATE
-        -l:libonnxruntime.so
+        ${ONNXRUNTIME_LIB}
         sentencepiece-static
     )
-    target_link_directories(pocket-tts-lib PRIVATE ${ONNXRUNTIME_ROOT}/lib)
+    if(ANDROID)
+        target_link_libraries(pocket-tts-lib PRIVATE log)
+    else()
+        target_link_directories(pocket-tts-lib PRIVATE ${ONNXRUNTIME_ROOT}/lib)
+    endif()
 
     target_include_directories(pocket-tts-lib PRIVATE ${POCKET_COMMON_INCLUDE_DIRS})
+
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(pocket-tts-lib PRIVATE pthread dl)
@@ -181,7 +201,7 @@ if(BUILD_SHARED_LIB)
                 ${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll
                 $<TARGET_FILE_DIR:pocket-tts-lib>
         )
-    else()
+    elseif(NOT ANDROID)
         add_custom_command(TARGET pocket-tts-lib POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:pocket-tts-lib>
         )

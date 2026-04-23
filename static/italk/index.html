@@ -49,7 +49,7 @@
 
     <div id="tab-chat" class="tabPanel hidden pt-2 space-y-2">
       <div class="bg-slate-800 border border-slate-700 rounded p-2">
-        <textarea id="textInput" rows="4" class="w-full bg-transparent outline-none resize-none text-base" placeholder="Enter text to speak"></textarea>
+        <textarea id="textInput" rows="4" class="w-full bg-transparent outline-none resize-none text-base" autocomplete="on" spellcheck="true" placeholder="Enter text to speak"></textarea>
         <div class="pt-1 text-[11px] text-slate-400 flex items-center justify-between">
           <div id="editingHint"></div>
           <div><span id="charCount">0</span></div>
@@ -307,14 +307,19 @@
     addChunk(chunk) {
       if (this.stopped) return;
 
-      // Convert chunk (Uint8Array) to Float32 pcm immediately
-      // This avoids keeping raw bytes + floats in memory
-      const data16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
-      const floatData = new Float32Array(data16.length);
-      for (let i = 0; i < data16.length; i++) floatData[i] = data16[i] / 32768;
+      // 1. Create the buffer first
+      const audioBuffer = this.audioContext.createBuffer(1, chunk.byteLength / 2, this.sampleRate);
 
-      const audioBuffer = this.audioContext.createBuffer(1, floatData.length, this.sampleRate);
-      audioBuffer.getChannelData(0).set(floatData);
+      // 2. Get a direct TypedArray view into the buffer's memory
+      const channelData = audioBuffer.getChannelData(0);
+
+      // 3. Create the 16-bit view from the incoming chunk
+      const data16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
+
+      // 4. Convert directly into the channelData view
+      for (let i = 0; i < data16.length; i++) {
+        channelData[i] = data16[i] / 32768;
+      }
 
       const source = this.audioContext.createBufferSource();
       source.buffer = audioBuffer;

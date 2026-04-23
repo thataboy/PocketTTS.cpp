@@ -460,7 +460,7 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
 }
 
 // compute frames_after_eos.
-static int calc_eos_extra(const std::string& text, int cfg_eos_extra, bool log) {
+static int calc_eos_extra(const std::string& text, int eos_extra) {
 
     auto count_words = [&](const std::string& text, int max=INT_MAX) {
         int count = 0;
@@ -474,10 +474,8 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra, bool log) 
         }
         return count;
     };
-    log = true;
-    int eos_extra = cfg_eos_extra;
     if (eos_extra < 0) {
-        int nwords = count_words(text, log ? INT_MAX : 5);
+        int nwords = count_words(text, 5);
         uint64_t val = rng::next();
         if (nwords < 5) {
             eos_extra = 3;
@@ -488,10 +486,9 @@ static int calc_eos_extra(const std::string& text, int cfg_eos_extra, bool log) 
                 ? 3 + (val % 3)
                 : 2 + (val % 2);
         }
-        if (log) std::cout << nwords << "|" << eos_extra;
     }
 
-    if (log) std::cout << "↗️" << text << "↖️\n";
+    std::cerr << "〔" << text << "〕\n";
     return eos_extra;
 }
 
@@ -1441,8 +1438,8 @@ public:
     static constexpr int SR = 24000;
 
     explicit PocketTTS(const Config& cfg = {}) : cfg_(cfg) {
-        // rng::seed(uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
-        rng::seed(uint64_t(28380294765));
+        rng::seed(uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
+        // rng::seed(uint64_t(28380294765));
         tok_ = std::make_unique<Tokenizer>(cfg_.tokenizer_path);
 
         // Thread budget: --threads sets the total. During pipelined streaming,
@@ -1477,7 +1474,9 @@ public:
             opts.SetIntraOpNumThreads(threads);
             opts.SetInterOpNumThreads(1);
             opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            #ifndef __ANDROID__
             opts.DisableMemPattern();
+            #endif
             opts.DisableCpuMemArena();
             return opts;
         };
@@ -2024,12 +2023,11 @@ void PocketTTS::stream(const std::string& text, const std::string& voice, Stream
 
 void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames) {
     auto sentences = split_sentences(text);
-    bool log = sentences.size() > 1;
 
     for (size_t si = 0; si < sentences.size(); ++si) {
         auto& prepared = sentences[si];
         if (prepared.empty()) continue;
-        auto eos_extra = calc_eos_extra(prepared, cfg_.eos_extra_frames, log);
+        auto eos_extra = calc_eos_extra(prepared, cfg_.eos_extra_frames);
         auto gen = make_gen(voice, tokenize(prepared), max_frames, eos_extra);
         dec_runner_->reset_state();  // zero existing buffers, no reallocation
 

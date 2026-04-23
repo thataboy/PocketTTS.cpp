@@ -40,7 +40,7 @@
 #include <filesystem>
 #include <random>
 #include <sstream>
-#include <nlohmann/json.hpp>
+#include "json.hpp"
 using json = nlohmann::ordered_json;
 
 namespace pocket_tts {
@@ -182,9 +182,9 @@ class TTSServer {
     std::vector<std::string> voice_names_;
 
     const std::vector<std::pair<std::string, std::string>> route_map = {
-        {"/books", "/Volumes/T7/books"},
-        {"/italk", "./italk"},
-        {"/", "/Volumes/T7/downloads"},
+        {"/books", "./static/books"},
+        {"/italk", "./static/italk"},
+        {"/", "./static/italk"},
     };
 
     void scan_voices() {
@@ -193,18 +193,18 @@ class TTSServer {
         if (!dir) return;
         struct dirent* ent;
         std::string voice;
-        std::cout << "Loading voices..." << std::flush;
+        std::cerr << "Loading voices..." << std::flush;
         while ((ent = readdir(dir)) != nullptr) {
             std::string n = ent->d_name;
             if (n.size() > 4 && n.substr(n.size() - 4) == ".wav") {
                 voice = n.substr(0, n.size() - 4);
-                std::cout << " " << voice << std::flush;
+                std::cerr << " " << voice << std::flush;
                 if (tts_.config().refresh_cache) tts_.prepare_voice(voice);
                 voice_names_.push_back(voice);
             }
         }
         closedir(dir);
-        std::cout << std::endl;
+        std::cerr << std::endl;
         std::sort(voice_names_.begin(), voice_names_.end());
     }
 
@@ -453,9 +453,6 @@ private:
                     return;
                 }
 
-                std::cout << "\n⏩" << voice << "➡️" << text.substr(0, 150)
-                          << (text.size() > 150 ? "..." : "") << "⬅️\n";
-
                 auto start = std::chrono::high_resolution_clock::now();
 
                 send_chunked_header(client_fd, "audio/pcm;rate=24000");
@@ -489,7 +486,7 @@ private:
                 }
 
                 if (client_disconnected) {
-                    std::cout << "  Client disconnected during stream\n";
+                    std::cerr << "  Client disconnected during stream\n";
                     return;
                 } else {
                     send_final_chunk(client_fd);
@@ -498,11 +495,12 @@ private:
                 auto end = std::chrono::high_resolution_clock::now();
                 double elapsed = std::chrono::duration<double>(end - start).count();
                 double duration = double(total_samples) / PocketTTS::SR;
-                std::cout << "     len: " << std::fixed << std::setprecision(2)
+                    std::cerr << "  ➡️➡️ " << voice
+                          << "     len: " << std::fixed << std::setprecision(2)
                                           << duration << "s (" << text.size() << ")"
                           << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                           << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                          << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n";
+                          << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n\n";
             } catch (const std::exception& e) {
                 send_json_error(client_fd, 400, e.what());
             }
@@ -521,12 +519,12 @@ private:
                     return;
                 }
 
-                std::cout << voice << "➡️" << text.substr(0, 300)
-                          << (text.size() > 300 ? "..." : "") << "⬅️\n";
                 auto start = std::chrono::high_resolution_clock::now();
 
                 std::vector<float> all_samples;
                 bool client_disconnected = false;
+                bool first_chunk = true;
+                double latency = 0.0;
 
                 {
                     std::lock_guard<std::mutex> lock(tts_mutex_);
@@ -535,13 +533,18 @@ private:
                             client_disconnected = true;
                             return false;
                         }
+                        if (first_chunk) {
+                            auto now = std::chrono::high_resolution_clock::now();
+                            latency = std::chrono::duration<double, std::milli>(now - start).count();
+                            first_chunk = false;
+                        }
                         all_samples.insert(all_samples.end(), samples, samples + n);
                         return true;
                     });
                 }
 
                 if (client_disconnected) {
-                    std::cout << "  Client disconnected during synthesis.\n";
+                    std::cerr << "  Client disconnected during synthesis.\n";
                     return;
                 }
 
@@ -550,62 +553,18 @@ private:
                 if (send_binary_response(client_fd, "audio/wav", wav)) {
                     double elapsed = std::chrono::duration<double>(end - start).count();
                     double duration = static_cast<double>(all_samples.size()) / 24000.0;
-                    std::cout << "     len: " << std::fixed << std::setprecision(2)
+                    std::cerr << "    ➡️ " << voice
+                              << "    len: " << std::fixed << std::setprecision(2)
                                               << duration << "s (" << text.size() << ")"
+                              << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                               << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n";
+                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n\n";
                 }
             } catch (const std::exception& e) {
                 send_json_error(client_fd, 400, e.what());
             }
             return;
         }
-
-        // /generate
-        /*
-        if (req.method == "POST" && req.path == "/generate") {
-            try {
-                auto j = json::parse(req.body);
-                std::string text = j.value("text", "");
-                std::string voice = j.value("voice", "narrator");
-
-                if (text.empty()) {
-                    send_response(client_fd, 400, "text/plain", "Missing text");
-                    return;
-                }
-
-                std::cout << voice << "➡️" << text << "⬅️\n";
-                auto start = std::chrono::high_resolution_clock::now();
-
-                bool client_disconnected = false;
-
-                AudioData audio;
-                {
-                    std::lock_guard<std::mutex> lock(tts_mutex_);
-                    audio = tts_.generate(text, voice);
-                }
-
-                if (!is_socket_alive(client_fd)) {
-                    std::cout << "  Client disconnected during synthesis.\n";
-                    return;
-                }
-
-                auto wav = wav_encode(audio.samples.data(), audio.samples.size(), PocketTTS::SR);
-                auto end = std::chrono::high_resolution_clock::now();
-                if (send_binary_response(client_fd, "audio/wav", wav)) {
-                    double elapsed = std::chrono::duration<double>(end - start).count();
-                    double duration = audio.duration_sec();
-                    std::cout << "     len: " << std::fixed << std::setprecision(2)
-                                              << duration << "s (" << text.size() << ")"
-                              << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n";
-                }
-            } catch (const std::exception& e) {
-                send_json_error(client_fd, 400, e.what());
-            }
-            return;
-        }
-        */
 
         // /voices
         if (req.method == "GET" && (req.path == "/voices" || req.path == "/voices/refresh")) {
