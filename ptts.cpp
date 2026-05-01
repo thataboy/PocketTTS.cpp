@@ -683,7 +683,10 @@ static void signal_handler(int sig) {
 
 static int serve(const pocket_tts::Config& cfg, int server_port) {
     try {
-        int threads = cfg.num_threads ? cfg.num_threads : std::max(2, int(std::thread::hardware_concurrency()) / 2);
+        int threads =
+            cfg.ar_threads && cfg.dec_threads
+            ? cfg.ar_threads + cfg.dec_threads
+            : pocket_tts::MAX_THREADS;
         std::cerr << "Loading (precision=" << cfg.precision << ", threads=" << threads << ")...\n";
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -721,7 +724,10 @@ static int generate(
     bool stdout_output = output.empty();
 
     try {
-        int threads = cfg.num_threads ? cfg.num_threads : std::max(2, int(std::thread::hardware_concurrency()) / 2);
+        int threads =
+            cfg.ar_threads && cfg.dec_threads
+            ? cfg.ar_threads + cfg.dec_threads
+            : pocket_tts::MAX_THREADS;
 
         if (!stdout_output) {
             std::cerr << "Loading (precision=" << cfg.precision << ", threads=" << threads << ")...\n";
@@ -826,7 +832,7 @@ int main(int argc, char* argv[]) {
                 << "  --precision <int8|fp32>  Model precision (default: int8)\n"
                 << "  --temperature <float>    Sampling temperature (default: 0.7)\n"
                 << "  --lsd-steps <int>        Flow matching steps (default: 1)\n"
-                << "  --threads <int>          Total thread budget (default: 0 = half cores)\n"
+                << "  --threads <int> <int>    AR threads, decoder threads (default: 0 = auto)\n"
                 << "  --models-dir <path>      ONNX models directory (default: models)\n"
                 << "  --voices-dir <path>      Voice samples directory (default: voices)\n"
                 << "  --tokenizer <path>       Tokenizer path (default: models/tokenizer.model)\n"
@@ -835,8 +841,9 @@ int main(int argc, char* argv[]) {
                 << "  --eos-extra <int>        Extra frames after EOS (default: -1, auto)\n"
                 << "  --first-chunk <int>      Frames in first decode chunk (default: 1)\n"
                 << "  --max-chunk <int>        Max frames per decode chunk (default: 15)\n"
+                << "  --seed <uint>            Seed for random number generator (default: 0 = auto)\n"
                 << "  --no-cache               Disable all disk caching (.emb and .kv files)\n"
-                << "  --rebuild-cache          Rebuild cache (update all stale entries)\n"
+                << "  --refresh-cache          Refresh cache (update all stale entries)\n"
                 << "  --verbose                Enable verbose output\n"
                 << "  --profile                Show profiling report\n";
             return 0;
@@ -845,7 +852,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--precision") cfg.precision = next();
         else if (a == "--temperature") cfg.temperature = std::stof(next());
         else if (a == "--lsd-steps") cfg.lsd_steps = std::stoi(next());
-        else if (a == "--threads") cfg.num_threads = std::stoi(next());
+        else if (a == "--threads") { cfg.ar_threads = std::stoul(next()); cfg.dec_threads = std::stoul(next()); }
         else if (a == "--models-dir") cfg.models_dir = next();
         else if (a == "--voices-dir") cfg.voices_dir = next();
         else if (a == "--tokenizer") cfg.tokenizer_path = next();
@@ -854,6 +861,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--eos-extra") cfg.eos_extra_frames = std::stoi(next());
         else if (a == "--first-chunk") cfg.first_chunk_frames = std::stoi(next());
         else if (a == "--max-chunk") cfg.max_chunk_frames = std::stoi(next());
+        else if (a == "--seed") cfg.seed = std::stoull(next());
         else if (a == "--no-cache") cfg.voice_cache = false;
         else if (a == "--refresh-cache") cfg.refresh_cache = true;
         else if (a == "--verbose") cfg.verbose = true;

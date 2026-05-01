@@ -48,6 +48,8 @@
 
 namespace pocket_tts {
 
+static int MAX_THREADS = std::min(12, std::max(3, int(std::thread::hardware_concurrency()) / 2));
+
 // ════════════════════════════════════════════════════════════════════════════
 // Types
 // ════════════════════════════════════════════════════════════════════════════
@@ -134,8 +136,9 @@ struct Config {
     float temperature = 0.7f;
     float eos_threshold = -4.0f;
     float noise_clamp = 0.0f;
-    int lsd_steps = 1, num_threads = 0, first_chunk_frames = 1, max_chunk_frames = 15;
+    int lsd_steps = 1, ar_threads = 0, dec_threads = 0, first_chunk_frames = 1, max_chunk_frames = 15;
     int eos_extra_frames = -1;  // -1 = auto-calculate from text length
+    uint64_t seed = 0;          // seed for rng, 0 = auto (use time since epoch)
     bool verbose = false;
     bool voice_cache = true;
     bool refresh_cache = false;
@@ -1438,23 +1441,25 @@ public:
     static constexpr int SR = 24000;
 
     explicit PocketTTS(const Config& cfg = {}) : cfg_(cfg) {
-        rng::seed(uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
-        // rng::seed(uint64_t(28380294765));
+        rng::seed(cfg_.seed > 0 ? cfg_.seed : uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         tok_ = std::make_unique<Tokenizer>(cfg_.tokenizer_path);
 
         // Thread budget: --threads sets the total. During pipelined streaming,
         // the AR generator and Mimi decoder run simultaneously, so we split the
         // budget between them. Non-pipelined models (encoder, text conditioner)
         // get the full budget since they run alone.
-        int cores = std::max(1, int(std::thread::hardware_concurrency()));
-        int total = cfg_.num_threads ? cfg_.num_threads : std::max(2, cores / 2);
-        total = std::min(total, 8);  // cap at 8
+        int threads_ar, threads_dec, total;
+        if (cfg_.ar_threads && cfg_.dec_threads) {
+            threads_ar = cfg_.ar_threads;
+            threads_dec = cfg_.dec_threads;
+            total = threads_ar + threads_dec;
+        } else {
+            // giving more threads to decoder seems to improve performance
+            total = MAX_THREADS;
+            threads_ar  = total % 2 == 0 ? total / 3 : total / 2;
+            threads_dec = total - threads_ar;
+        }
         int threads_full = total;
-        // Ensure that there are 3x decoder threads as AR threads
-        // this seems to prevent robotic voice in output
-        total = std::max(total, 3);
-        int threads_ar = total / 3;
-        int threads_dec = total - threads_ar;
 
         auto make_opts = [](int threads) {
             Ort::SessionOptions opts;
@@ -1657,7 +1662,7 @@ public:
         auto start = std::chrono::high_resolution_clock::now();
         Tensor dummy_voice({1, 8, 1024});
         std::fill(dummy_voice.data.begin(), dummy_voice.data.end(), 0.0f);
-        stream("Hi.", dummy_voice, [](const float*, size_t) { return true; }, 1);
+        stream("Hello world.", dummy_voice, [](const float*, size_t) { return true; }, 1);
         auto end = std::chrono::high_resolution_clock::now();
         return std::chrono::duration<double, std::milli>(end - start).count();
     }
@@ -2074,7 +2079,7 @@ void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallb
                 cv.wait(lock, [&]{ return (int)queue.size() >= want || gen_done || aborted; });
                 if (aborted) break;
 
-                int take = gen_done ? (int)queue.size() : std::min((int)queue.size(), want);
+                int take = std::min((int)queue.size(), want);
                 for (int i = 0; i < take; ++i) {
                     batch.push_back(std::move(queue.front()));
                     queue.pop_front();
@@ -2130,7 +2135,8 @@ void* ptt_create(const char* models_dir, const char* voices_dir,
         if (precision) cfg.precision = precision;
         cfg.temperature = temperature;
         cfg.lsd_steps = lsd_steps;
-        cfg.num_threads = num_threads;
+        cfg.ar_threads = num_threads % 2 == 0 ? num_threads / 3 : num_threads / 2;
+        cfg.dec_threads = num_threads - cfg.ar_threads;
         return new pocket_tts::PocketTTS(cfg);
     } catch (const std::exception& e) {
         std::cerr << "[pocket-tts] init error: " << e.what() << "\n";
