@@ -40,6 +40,7 @@
 #include <filesystem>
 #include <random>
 #include <sstream>
+#include <thread>
 #include "json.hpp"
 using json = nlohmann::ordered_json;
 
@@ -179,6 +180,7 @@ class TTSServer {
     int port_;
     ptt_socket_t server_fd_ = PTT_INVALID_SOCKET;
     std::mutex tts_mutex_;
+    std::mutex voices_mutex_;
     std::vector<std::string> voice_names_;
 
     const std::vector<std::pair<std::string, std::string>> route_map = {
@@ -288,8 +290,18 @@ public:
             setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
 
-            handle_request(client_fd);
-            ptt_close(client_fd);
+            // Keep the accept loop responsive. Each client gets a small
+            // worker thread, so a long /stream request does not prevent
+            // /health, static files, or another request from being accepted.
+            //
+            // The TTS engine is still protected by tts_mutex_ inside the
+            // request handlers, so this does not try to run multiple TTS
+            // generations at the same time. That keeps this safe for local use
+            // while moving from strictly one connection at a time to 2+.
+            std::thread([this, client_fd]() {
+                handle_request(client_fd);
+                ptt_close(client_fd);
+            }).detach();
         }
     }
 
@@ -432,7 +444,7 @@ private:
 
     #include "italk.hpp"
 
-    void handle_request(int client_fd) {
+    void handle_request(ptt_socket_t client_fd) {
         HttpRequest req = HttpRequest::parse(client_fd);
         if (req.path.empty()) return;
 
@@ -566,14 +578,34 @@ private:
             return;
         }
 
-        // /voices
-        if (req.method == "GET" && (req.path == "/voices" || req.path == "/voices/refresh")) {
-            if (req.path == "/voices/refresh") {
-                scan_voices();
-                tts_.clear_vcache();
+        // /voices should NOT wait behind a long /stream request.
+        // The old version used tts_mutex_ here, which meant curl /voices
+        // blocked until the current stream finished. Reading voice_names_ only
+        // needs its own small mutex. Refresh still touches the TTS voice cache,
+        // so that rare path takes tts_mutex_, but plain GET /voices does not.
+        if (req.method == "GET" && req.path == "/voices") {
+            std::vector<std::string> voices_snapshot;
+            {
+                std::lock_guard<std::mutex> lock(voices_mutex_);
+                voices_snapshot = voice_names_;
             }
             json j;
-            j["voices"] = voice_names_;
+            j["voices"] = voices_snapshot;
+            send_response(client_fd, 200, "application/json", j.dump());
+            return;
+        }
+
+        if (req.method == "GET" && req.path == "/voices/refresh") {
+            std::vector<std::string> voices_snapshot;
+            {
+                std::lock_guard<std::mutex> tts_lock(tts_mutex_);
+                std::lock_guard<std::mutex> voices_lock(voices_mutex_);
+                scan_voices();
+                tts_.clear_vcache();
+                voices_snapshot = voice_names_;
+            }
+            json j;
+            j["voices"] = voices_snapshot;
             send_response(client_fd, 200, "application/json", j.dump());
             return;
         }
