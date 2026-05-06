@@ -36,8 +36,15 @@
 
 #include "ptts_engine.cpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdint>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <list>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -109,26 +116,60 @@ struct HttpRequest {
     }
 };
 
-// Helper to create a standard PCM16 (Format 1) mono WAV buffer
-static std::vector<uint8_t> wav_encode(const float* samples, size_t n, int sample_rate) {
-    size_t data_size = n * 2;
-    size_t file_size = 36 + data_size;
-    std::vector<uint8_t> buf(44 + data_size);
+// Helpers for standard mono PCM16 WAV output.
+// The engine produces f32 samples; public output is normalized to s16le.
+static std::vector<uint8_t> wav_header(int sample_rate, uint32_t data_size) {
+    uint32_t riff_size = (data_size > UINT32_MAX - 36u) ? UINT32_MAX : 36u + data_size;
+    std::vector<uint8_t> buf(44);
     auto w = [&](size_t off, const char* s, size_t len) { memcpy(buf.data() + off, s, len); };
     auto w32 = [&](size_t off, uint32_t v) { memcpy(buf.data() + off, &v, 4); };
     auto w16 = [&](size_t off, uint16_t v) { memcpy(buf.data() + off, &v, 2); };
 
-    w(0, "RIFF", 4); w32(4, file_size); w(8, "WAVE", 4);
+    w(0, "RIFF", 4); w32(4, riff_size); w(8, "WAVE", 4);
     w(12, "fmt ", 4); w32(16, 16);
     w16(20, 1); // PCM Format 1
     w16(22, 1); // Mono
     w32(24, sample_rate);
-    w32(28, sample_rate * 2); // Byte rate
+    w32(28, sample_rate * 2); // Byte rate: 1 channel * 16 bits
     w16(32, 2); // Block align
-    w16(34, 16); // 16 bits
+    w16(34, 16); // Bits per sample
     w(36, "data", 4); w32(40, data_size);
+    return buf;
+}
 
-    int16_t* pcm = reinterpret_cast<int16_t*>(buf.data() + 44);
+static bool write_all(FILE* f, const void* data, size_t bytes) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    while (bytes > 0) {
+        size_t n = fwrite(p, 1, bytes, f);
+        if (n == 0) return false;
+        p += n;
+        bytes -= n;
+    }
+    return true;
+}
+
+static bool write_wav_header(FILE* f, int sample_rate) {
+    auto header = wav_header(sample_rate, UINT32_MAX - 36u);
+    return write_all(f, header.data(), header.size());
+}
+
+static std::vector<int16_t> pcm16_from_f32(const float* samples, size_t n) {
+    std::vector<int16_t> pcm(n);
+    for (size_t i = 0; i < n; ++i) {
+        float s = std::max(-1.0f, std::min(1.0f, samples[i]));
+        pcm[i] = static_cast<int16_t>(s * 32767.0f);
+    }
+    return pcm;
+}
+
+// Helper to create a complete WAV buffer when the final sample count is known.
+static std::vector<uint8_t> wav_encode(const float* samples, size_t n, int sample_rate) {
+    uint32_t data_size = static_cast<uint32_t>(std::min<size_t>(n * 2, UINT32_MAX));
+    auto buf = wav_header(sample_rate, data_size);
+    size_t header_size = buf.size();
+    buf.resize(header_size + n * 2);
+
+    int16_t* pcm = reinterpret_cast<int16_t*>(buf.data() + header_size);
     for (size_t i = 0; i < n; ++i) {
         float s = std::max(-1.0f, std::min(1.0f, samples[i]));
         pcm[i] = static_cast<int16_t>(s * 32767.0f);
@@ -176,12 +217,75 @@ static std::string url_decode(const std::string& str) {
 }
 
 class TTSServer {
-    PocketTTS& tts_;
     int port_;
     ptt_socket_t server_fd_ = PTT_INVALID_SOCKET;
-    std::mutex tts_mutex_;
+
+    // Small engine pool. The server owns every engine it uses.
+    // It starts with one engine, creates extras only under concurrency,
+    // then unloads idle extras down to keep_engines_.
+    Config cfg_;
+    size_t max_engines_ = 3;
+    size_t keep_engines_ = 1;
+    static constexpr std::chrono::seconds EXTRA_ENGINE_IDLE_TIMEOUT{30};
+
+    struct EngineSlot {
+        std::unique_ptr<PocketTTS> engine;
+        bool busy = false;
+        std::chrono::steady_clock::time_point idle_since{};
+
+        explicit EngineSlot(std::unique_ptr<PocketTTS> tts_engine)
+            : engine(std::move(tts_engine)), idle_since(std::chrono::steady_clock::now()) {}
+
+        PocketTTS& get() { return *engine; }
+        const PocketTTS& get() const { return *engine; }
+    };
+
+    std::list<EngineSlot> tts_engines_;
+    std::mutex tts_pool_mutex_;
+    std::condition_variable tts_pool_cv_;
+    std::atomic<bool> pruner_stop_{false};
+    std::atomic<bool> pruner_active_{false};
+    std::thread tts_pruner_thread_;
+    std::condition_variable pruner_cv_;
+    std::mutex pruner_mutex_;
     std::mutex voices_mutex_;
     std::vector<std::string> voice_names_;
+
+    class EngineLease {
+        TTSServer* server_ = nullptr;
+        EngineSlot* slot_ = nullptr;
+    public:
+        EngineLease() = default;
+        EngineLease(TTSServer* server, EngineSlot* slot) : server_(server), slot_(slot) {}
+
+        EngineLease(EngineLease&& other) noexcept {
+            server_ = other.server_;
+            slot_ = other.slot_;
+            other.server_ = nullptr;
+            other.slot_ = nullptr;
+        }
+
+        EngineLease& operator=(EngineLease&& other) noexcept {
+            if (this != &other) {
+                release();
+                server_ = other.server_;
+                slot_ = other.slot_;
+                other.server_ = nullptr;
+                other.slot_ = nullptr;
+            }
+            return *this;
+        }
+        ~EngineLease() { release(); }
+        PocketTTS& get() { return slot_->get(); }
+
+    private:
+        void release() {
+            if (server_) {
+                server_->release_engine(slot_);
+                server_ = nullptr;
+            }
+        }
+    };
 
     const std::vector<std::pair<std::string, std::string>> route_map = {
         {"/books", "./static/books"},
@@ -189,9 +293,9 @@ class TTSServer {
         {"/", "./static/italk"},
     };
 
-    void scan_voices() {
+    void scan_voices(PocketTTS* prepare_engine = nullptr) {
         voice_names_.clear();
-        DIR* dir = opendir(tts_.config().voices_dir.c_str());
+        DIR* dir = opendir(cfg_.voices_dir.c_str());
         if (!dir) return;
         struct dirent* ent;
         std::string voice;
@@ -201,7 +305,7 @@ class TTSServer {
             if (n.size() > 4 && n.substr(n.size() - 4) == ".wav") {
                 voice = n.substr(0, n.size() - 4);
                 std::cerr << " " << voice << std::flush;
-                if (tts_.config().refresh_cache) tts_.prepare_voice(voice);
+                if (prepare_engine) prepare_engine->prepare_voice(voice);
                 voice_names_.push_back(voice);
             }
         }
@@ -211,11 +315,41 @@ class TTSServer {
     }
 
 public:
-    TTSServer(PocketTTS& tts, int port) : tts_(tts), port_(port) {
-        scan_voices();
+    TTSServer(const Config& cfg, int port,
+              size_t max_engines, size_t keep_engines)
+        : port_(port), cfg_(cfg) {
+        max_engines_ = std::max<size_t>(1, max_engines);
+        keep_engines_ = std::max<size_t>(1, std::min(keep_engines, max_engines_));
+
+        int threads =
+            cfg_.ar_threads && cfg_.dec_threads
+            ? cfg_.ar_threads + cfg_.dec_threads
+            : MAX_THREADS;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto engine = acquire_engine();
+        std::cerr << "  Loaded in " << std::fixed << std::setprecision(2) << elapsed_s(t0) << "s"
+                  << " (precision=" << cfg_.precision
+                  << ", threads=" << threads << ")\n"
+                  << "  TTS engine pool: keep " << keep_engines_
+                  << ", max " << max_engines_
+                  << ", idle timeout " << EXTRA_ENGINE_IDLE_TIMEOUT.count() << "s\n";
+        double warmup_ms = engine.get().warmup();
+        std::cerr << "  Warmup in " << std::fixed << std::setprecision(0)
+                  << warmup_ms << "ms\n";
+
+        // Initial scan prepares voice cache if cfg_.refresh_cache is true
+        // This happens before requests are accepted, so no engine locking is needed.
+        {
+            std::lock_guard<std::mutex> lock(voices_mutex_);
+            scan_voices(cfg_.refresh_cache ? &engine.get() : nullptr);
+        }
     }
 
     ~TTSServer() {
+        pruner_stop_ = true;
+        pruner_cv_.notify_all(); // Wake up the pruner NOW
+        if (tts_pruner_thread_.joinable()) tts_pruner_thread_.join();
+
         if (server_fd_ != PTT_INVALID_SOCKET && server_fd_ == g_server_fd) {
             ptt_close(server_fd_);
             g_server_fd = PTT_INVALID_SOCKET;
@@ -294,10 +428,9 @@ public:
             // worker thread, so a long /stream request does not prevent
             // /health, static files, or another request from being accepted.
             //
-            // The TTS engine is still protected by tts_mutex_ inside the
-            // request handlers, so this does not try to run multiple TTS
-            // generations at the same time. That keeps this safe for local use
-            // while moving from strictly one connection at a time to 2+.
+            // TTS requests borrow an engine from the small dynamic pool.
+            // Non-TTS requests do not need a TTS engine, so /health, static
+            // files, and /voices can remain responsive during long generations.
             std::thread([this, client_fd]() {
                 handle_request(client_fd);
                 ptt_close(client_fd);
@@ -305,7 +438,108 @@ public:
         }
     }
 
+    void print_profiling_reports() {
+        std::lock_guard<std::mutex> lock(tts_pool_mutex_);
+        size_t i = 1;
+        for (auto it = tts_engines_.begin(); it != tts_engines_.end(); ++it, ++i) {
+            std::cerr << "\nProfiling report for server TTS engine " << i << " :\n";
+            it->get().print_profiling_report();
+        }
+    }
+
 private:
+    EngineLease acquire_engine() {
+        std::unique_lock<std::mutex> lock(tts_pool_mutex_);
+        while (true) {
+            for (auto& slot : tts_engines_) {
+                if (!slot.busy) {
+                    slot.busy = true;
+                    slot.idle_since = {};
+                    return EngineLease(this, &slot);
+                }
+            }
+
+            if (tts_engines_.size() < max_engines_) {
+                std::cerr << "      🚀 Loading TTS engine "
+                          << 1 + tts_engines_.size() << "/" << max_engines_ << " 🚀\n";
+                auto engine = std::make_unique<PocketTTS>(cfg_);
+                tts_engines_.emplace_back(std::move(engine));
+                tts_engines_.back().busy = true;
+                tts_engines_.back().idle_since = {};
+                return EngineLease(this, &tts_engines_.back());
+            }
+            tts_pool_cv_.wait(lock);
+        }
+    }
+
+    void release_engine(EngineSlot* slot) {
+        bool need_pruner;
+        {
+            std::lock_guard<std::mutex> lock(tts_pool_mutex_);
+            slot->busy = false;
+            slot->idle_since = std::chrono::steady_clock::now();
+            need_pruner = tts_engines_.size() > keep_engines_;
+        }
+        tts_pool_cv_.notify_one();
+        if (need_pruner) {
+            std::lock_guard<std::mutex> thread_lock(pruner_mutex_);
+            start_pruner_locked();
+        }
+    }
+
+    void start_pruner_locked() {
+        if (pruner_active_) return;
+        if (tts_pruner_thread_.joinable()) tts_pruner_thread_.join(); // Clean up old handle
+
+        pruner_active_ = true;
+        tts_pruner_thread_ = std::thread([this]() {
+            std::unique_lock<std::mutex> lock(tts_pool_mutex_);
+            while (!pruner_stop_.load()) {
+                // mission accomplished, break loop
+                if (tts_engines_.size() <= keep_engines_) {
+                    break; // set pruner_active_ with lock below
+                }
+                // Deep sleep: wakes only on release_engine or timeout
+                tts_pool_cv_.wait_for(lock, std::chrono::seconds(10));
+
+                if (!pruner_stop_) {
+                    prune_idle_engines_locked(std::chrono::steady_clock::now());
+                }
+            }
+            std::lock_guard<std::mutex> thread_lock(pruner_mutex_);
+            pruner_active_ = false;
+        });
+    }
+
+    void prune_idle_engines_locked(std::chrono::steady_clock::time_point now) {
+        if (tts_engines_.empty()) return;
+
+        auto it = tts_engines_.begin();
+        while (tts_engines_.size() > keep_engines_ && it != tts_engines_.end()) {
+            // Prune if idle and expired
+            if (!it->busy && it->idle_since != std::chrono::steady_clock::time_point{} &&
+                (now - it->idle_since >= EXTRA_ENGINE_IDLE_TIMEOUT)) {
+                it = tts_engines_.erase(it); // it now points to the next element
+                std::cerr << "     ⛔ Unloading TTS engine after "
+                          << EXTRA_ENGINE_IDLE_TIMEOUT.count() << "s idle, "
+                          << tts_engines_.size() << " remaining ⛔\n" ;
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void clear_vcache_on_idle_engines() {
+        std::lock_guard<std::mutex> lock(tts_pool_mutex_);
+        for (auto& slot : tts_engines_) {
+            // Only clear engines not currently generating speech
+            if (!slot.busy) {
+                slot.engine->clear_vcache();
+            }
+        }
+        tts_pool_cv_.notify_all();
+    }
+
     static bool ptt_send(ptt_socket_t fd, const void* data, size_t len) {
         int flags = 0;
 #ifdef MSG_NOSIGNAL
@@ -465,31 +699,26 @@ private:
                     return;
                 }
 
-                auto start = std::chrono::high_resolution_clock::now();
 
-                send_chunked_header(client_fd, "audio/pcm;rate=24000");
+                send_chunked_header(client_fd, "audio/pcm;format=s16le;rate=24000;channels=1");
 
+                auto t0 = std::chrono::high_resolution_clock::now();
                 bool first_chunk = true;
                 bool client_disconnected = false;
                 size_t total_samples = 0;
                 double latency = 0.0;
 
                 {
-                    std::lock_guard<std::mutex> lock(tts_mutex_);
-                    tts_.stream(text, voice, [&](const float* samples, size_t n) {
-                        std::vector<int16_t> pcm(n);
-                        for (size_t i = 0; i < n; ++i) {
-                            pcm[i] = static_cast<int16_t>
-                                (std::max(-1.0f, std::min(1.0f, samples[i])) * 32767.0f);
-                        }
+                    auto engine = acquire_engine();
+                    engine.get().stream(text, voice, [&](const float* samples, size_t n) {
+                        auto pcm = pcm16_from_f32(samples, n);
                         if (!is_socket_alive(client_fd)
                             || !send_chunk(client_fd, pcm.data(), n * 2)) {
                             client_disconnected = true;
                             return false;
                         }
                         if (first_chunk) {
-                            auto now = std::chrono::high_resolution_clock::now();
-                            latency = std::chrono::duration<double, std::milli>(now - start).count();
+                            latency = elapsed_ms(t0);
                             first_chunk = false;
                         }
                         total_samples += n;
@@ -504,15 +733,15 @@ private:
                     send_final_chunk(client_fd);
                 }
 
-                auto end = std::chrono::high_resolution_clock::now();
-                double elapsed = std::chrono::duration<double>(end - start).count();
+                auto elapsed = elapsed_s(t0);
                 double duration = double(total_samples) / PocketTTS::SR;
                     std::cerr << "  ➡️➡️ " << voice
                           << "     len: " << std::fixed << std::setprecision(2)
                                           << duration << "s (" << text.size() << ")"
                           << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                           << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                          << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n\n";
+                          << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n"
+                          << (cfg_.trace ? "\n" : "");
             } catch (const std::exception& e) {
                 send_json_error(client_fd, 400, e.what());
             }
@@ -531,23 +760,21 @@ private:
                     return;
                 }
 
-                auto start = std::chrono::high_resolution_clock::now();
-
+                auto t0 = std::chrono::high_resolution_clock::now();
                 std::vector<float> all_samples;
                 bool client_disconnected = false;
                 bool first_chunk = true;
                 double latency = 0.0;
 
                 {
-                    std::lock_guard<std::mutex> lock(tts_mutex_);
-                    tts_.stream(text, voice, [&](const float* samples, size_t n) {
+                    auto engine = acquire_engine();
+                    engine.get().stream(text, voice, [&](const float* samples, size_t n) {
                         if (!is_socket_alive(client_fd)) {
                             client_disconnected = true;
                             return false;
                         }
                         if (first_chunk) {
-                            auto now = std::chrono::high_resolution_clock::now();
-                            latency = std::chrono::duration<double, std::milli>(now - start).count();
+                            latency = elapsed_ms(t0);
                             first_chunk = false;
                         }
                         all_samples.insert(all_samples.end(), samples, samples + n);
@@ -561,16 +788,16 @@ private:
                 }
 
                 auto wav = wav_encode(all_samples.data(), all_samples.size(), PocketTTS::SR);
-                auto end = std::chrono::high_resolution_clock::now();
                 if (send_binary_response(client_fd, "audio/wav", wav)) {
-                    double elapsed = std::chrono::duration<double>(end - start).count();
+                    auto elapsed = elapsed_s(t0);
                     double duration = static_cast<double>(all_samples.size()) / 24000.0;
                     std::cerr << "    ➡️ " << voice
                               << "    len: " << std::fixed << std::setprecision(2)
                                               << duration << "s (" << text.size() << ")"
                               << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                               << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n\n";
+                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n"
+                              << (cfg_.trace ? "\n" : "");
                 }
             } catch (const std::exception& e) {
                 send_json_error(client_fd, 400, e.what());
@@ -578,11 +805,7 @@ private:
             return;
         }
 
-        // /voices should NOT wait behind a long /stream request.
-        // The old version used tts_mutex_ here, which meant curl /voices
-        // blocked until the current stream finished. Reading voice_names_ only
-        // needs its own small mutex. Refresh still touches the TTS voice cache,
-        // so that rare path takes tts_mutex_, but plain GET /voices does not.
+        // /voices use own mutex so a long /stream request doesn't block it.
         if (req.method == "GET" && req.path == "/voices") {
             std::vector<std::string> voices_snapshot;
             {
@@ -598,12 +821,12 @@ private:
         if (req.method == "GET" && req.path == "/voices/refresh") {
             std::vector<std::string> voices_snapshot;
             {
-                std::lock_guard<std::mutex> tts_lock(tts_mutex_);
                 std::lock_guard<std::mutex> voices_lock(voices_mutex_);
                 scan_voices();
-                tts_.clear_vcache();
                 voices_snapshot = voice_names_;
             }
+            clear_vcache_on_idle_engines();
+
             json j;
             j["voices"] = voices_snapshot;
             send_response(client_fd, 200, "application/json", j.dump());
@@ -713,33 +936,19 @@ static void signal_handler(int sig) {
     std::cout << "\nShutting down...\n";
 }
 
-static int serve(const pocket_tts::Config& cfg, int server_port) {
+static int serve(const pocket_tts::Config& cfg, int server_port, size_t max_engines, size_t keep_engines) {
     try {
-        int threads =
-            cfg.ar_threads && cfg.dec_threads
-            ? cfg.ar_threads + cfg.dec_threads
-            : pocket_tts::MAX_THREADS;
-        std::cerr << "Loading (precision=" << cfg.precision << ", threads=" << threads << ")...\n";
-
-        auto t0 = std::chrono::high_resolution_clock::now();
-        pocket_tts::PocketTTS tts(cfg);
-        auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count(); };
-
-        std::cerr << "  Loaded in " << std::fixed << std::setprecision(2) << elapsed() << "s\n";
-        double warmup_ms = tts.warmup();
-        std::cerr << "  Warmup in " << std::fixed << std::setprecision(0) << warmup_ms << "ms\n";
-
         signal(SIGINT, signal_handler);
         signal(SIGTERM, signal_handler);
 #ifndef _WIN32
         signal(SIGPIPE, SIG_IGN);
 #endif
 
-        pocket_tts::TTSServer server(tts, server_port);
+        pocket_tts::TTSServer server(cfg, server_port, max_engines, keep_engines);
         if (!server.start()) return 1;
         server.run();
 
-        if (pocket_tts::g_prof.enabled) tts.print_profiling_report();
+        if (pocket_tts::g_prof.enabled) server.print_profiling_reports();
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -767,63 +976,56 @@ static int generate(
 
         auto t0 = std::chrono::high_resolution_clock::now();
         pocket_tts::PocketTTS tts(cfg);
-        auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count(); };
-
         if (!stdout_output) {
-            std::cerr << "  Loaded in " << std::fixed << std::setprecision(2) << elapsed() << "s\n";
-            std::cerr << "Generating: \"" << text << "\" with " << voice << "\n";
+            std::cerr << "  Loaded in " << std::fixed << std::setprecision(2)
+                      << pocket_tts::elapsed_s(t0) << "s\n";
+            std::cerr << "Generating: 〔" << (text.size() <= 150 ? text : text.substr(0, 150) + "...")
+                      << "〕with " << voice << "\n";
         }
         t0 = std::chrono::high_resolution_clock::now();
 
         pocket_tts::AudioData audio;
-        double first_chunk_latency = 0;
+        size_t streamed_stdout_samples = 0;
+        double latency = 0;
 
-        if (stdout_output) {
+        if (!stdout_output) {
+            audio = tts.generate(text, voice);
+        } else {
 #ifdef _WIN32
             _setmode(_fileno(stdout), _O_BINARY);
 #endif
-            size_t total_samples = 0;
+            if (!pocket_tts::write_wav_header(stdout, pocket_tts::PocketTTS::SR)) {
+                throw std::runtime_error("failed to write WAV header to stdout");
+            }
+
             bool first = true;
-            tts.stream(text, voice, [&](const float* s, size_t n) {
+            tts.stream(text, voice, [&](const float* samples, size_t n) {
                 if (first) {
-                    first_chunk_latency = std::chrono::duration<double, std::milli>(
-                        std::chrono::high_resolution_clock::now() - t0).count();
+                    latency = pocket_tts::elapsed_ms(t0);
                     first = false;
                 }
-                fwrite(s, sizeof(float), n, stdout);
+                auto pcm = pocket_tts::pcm16_from_f32(samples, n);
+                if (!pocket_tts::write_all(stdout, pcm.data(), pcm.size() * 2)) {
+                    throw std::runtime_error("failed to write audio to stdout");
+                }
+                streamed_stdout_samples += n;
                 fflush(stdout);
-                total_samples += n;
                 return true;
             });
-            audio.sample_rate = pocket_tts::PocketTTS::SR;
-            audio.samples.resize(total_samples);
-        } else {
-            if (pocket_tts::g_prof.enabled) {
-                std::vector<float> samples;
-                bool first = true;
-                tts.stream(text, voice, [&](const float* s, size_t n) {
-                    if (first) {
-                        first_chunk_latency = std::chrono::duration<double, std::milli>(
-                            std::chrono::high_resolution_clock::now() - t0).count();
-                        first = false;
-                    }
-                    samples.insert(samples.end(), s, s + n);
-                    return true;
-                });
-                audio = {std::move(samples), pocket_tts::PocketTTS::SR};
-            } else {
-                audio = tts.generate(text, voice);
-            }
+            fflush(stdout);
         }
 
-        double gen_time = elapsed();
-        double duration = audio.duration_sec();
+        double gen_time = pocket_tts::elapsed_s(t0);
+        double duration = stdout_output
+            ? static_cast<double>(streamed_stdout_samples) / pocket_tts::PocketTTS::SR
+            : audio.duration_sec();
 
         std::cerr << "  " << std::fixed << std::setprecision(2)
-                  << duration << "s audio in " << gen_time << "s (RTFx: " << duration / gen_time << "x)\n";
-        if (pocket_tts::g_prof.enabled) {
+                  << duration << "s audio in " << gen_time
+                  << "s (RTFx: " << duration / gen_time << "x)\n";
+        if (latency > 0) {
             std::cerr << "  First chunk latency: " << std::fixed << std::setprecision(0)
-                      << first_chunk_latency << "ms\n";
+                      << latency << "ms\n";
         }
 
         if (!stdout_output) {
@@ -844,6 +1046,8 @@ static int generate(
 int main(int argc, char* argv[]) {
     pocket_tts::Config cfg;
     int server_port = 9000;
+    size_t max_engines = 3;
+    size_t keep_engines = 1;
     std::string text, voice, output;
     int nargs = 0;
 
@@ -861,6 +1065,8 @@ int main(int argc, char* argv[]) {
                 << "   Generate TTS:    " << argv[0] << " [OPTIONS] TEXT VOICE [OUTPUT]\n\n"
                 << "Options:\n"
                 << "  --port <port>            Server port (default: 9000)\n"
+                << "  --max-engines <int>      Max TTS engines for concurrent output (default: 3)\n"
+                << "  --keep-engines <int>     Idle TTS engines to keep in memory (default: 1)\n"
                 << "  --precision <int8|fp32>  Model precision (default: int8)\n"
                 << "  --temperature <float>    Sampling temperature (default: 0.7)\n"
                 << "  --lsd-steps <int>        Flow matching steps (default: 1)\n"
@@ -877,10 +1083,13 @@ int main(int argc, char* argv[]) {
                 << "  --no-cache               Disable all disk caching (.emb and .kv files)\n"
                 << "  --refresh-cache          Refresh cache (update all stale entries)\n"
                 << "  --verbose                Enable verbose output\n"
+                << "  --trace                  Enable detailed logging\n"
                 << "  --profile                Show profiling report\n";
             return 0;
         }
         else if (a == "--port") server_port = std::stoi(next());
+        else if (a == "--max-engines") max_engines = std::max<size_t>(1, std::stoul(next()));
+        else if (a == "--keep-engines") keep_engines = std::max<size_t>(1, std::stoul(next()));
         else if (a == "--precision") cfg.precision = next();
         else if (a == "--temperature") cfg.temperature = std::stof(next());
         else if (a == "--lsd-steps") cfg.lsd_steps = std::stoi(next());
@@ -897,6 +1106,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--no-cache") cfg.voice_cache = false;
         else if (a == "--refresh-cache") cfg.refresh_cache = true;
         else if (a == "--verbose") cfg.verbose = true;
+        else if (a == "--trace") cfg.trace = true;
         else if (a == "--profile") pocket_tts::g_prof.enabled = true;
         else if (!a.empty() && a[0] == '-') { std::cerr << "Unknown: " << a << "\n"; return 1; }
         else {
@@ -908,7 +1118,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (nargs == 0) {
-        return serve(cfg, server_port);
+        return serve(cfg, server_port, max_engines, keep_engines);
     }
     if (nargs < 2) {
         std::cerr << "Need: TEXT VOICE [OUTPUT]\n";
@@ -916,6 +1126,7 @@ int main(int argc, char* argv[]) {
     }
     if (output.empty()) {
         cfg.verbose = false;
+        cfg.trace = false;
         pocket_tts::g_prof.enabled = false;
     }
     return generate(cfg, text, voice, output);

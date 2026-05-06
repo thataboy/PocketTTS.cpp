@@ -50,6 +50,14 @@ namespace pocket_tts {
 
 static int MAX_THREADS = std::min(12, std::max(3, int(std::thread::hardware_concurrency()) / 2));
 
+static double elapsed_s(std::chrono::time_point<std::chrono::high_resolution_clock> t0) {
+    return std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count();
+};
+
+static double elapsed_ms(std::chrono::time_point<std::chrono::high_resolution_clock> t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+};
+
 // ════════════════════════════════════════════════════════════════════════════
 // Types
 // ════════════════════════════════════════════════════════════════════════════
@@ -140,6 +148,7 @@ struct Config {
     int eos_extra_frames = -1;  // -1 = auto-calculate from text length
     uint64_t seed = 0;          // seed for rng, 0 = auto (use time since epoch)
     bool verbose = false;
+    bool trace = false;
     bool voice_cache = true;
     bool refresh_cache = false;
 };
@@ -304,7 +313,7 @@ static std::string clean_text(const std::string& raw, bool keep_newl) {
             continue;
         }
         text += c;
-        has_alnum |= std::isalnum(c);
+        if (!has_alnum) has_alnum = std::isalnum(c);
         prev_newl = prev_space = false;
     }
     return has_alnum ? text : "";
@@ -316,7 +325,8 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
     constexpr size_t kMinLen = 75;
 
     // for long text, clean_text should keep \n to use as hard break points
-    std::string text = clean_text(raw, raw.size() > kSoftLimit);
+    bool keep_newl = raw.size() > kSoftLimit;
+    std::string text = clean_text(raw, keep_newl);
     std::vector<std::string> sentences;
 
     auto push_chunk = [&](const std::string& chunk) {
@@ -463,7 +473,7 @@ static std::vector<std::string> split_sentences(const std::string& raw) {
 }
 
 // compute frames_after_eos.
-static int calc_eos_extra(const std::string& text, int eos_extra) {
+static int calc_eos_extra(const std::string& text, int eos_extra, bool trace) {
 
     auto count_words = [&](const std::string& text, int max=INT_MAX) {
         int count = 0;
@@ -491,7 +501,7 @@ static int calc_eos_extra(const std::string& text, int eos_extra) {
         }
     }
 
-    std::cerr << "〔" << text << "〕\n";
+    if (trace) std::cerr << "〔" << text << "〕\n";
     return eos_extra;
 }
 
@@ -526,8 +536,7 @@ struct Profiler {
         ScopedTimer(Profiler& p, const std::string& n) : prof(p), name(n), start(std::chrono::high_resolution_clock::now()) {}
         ~ScopedTimer() {
             if (prof.enabled) {
-                auto end = std::chrono::high_resolution_clock::now();
-                double ms = std::chrono::duration<double, std::milli>(end - start).count();
+                double ms = elapsed_ms(start);
                 prof.timers[name].name = name;
                 prof.timers[name].add(ms);
             }
@@ -1663,8 +1672,7 @@ public:
         Tensor dummy_voice({1, 8, 1024});
         std::fill(dummy_voice.data.begin(), dummy_voice.data.end(), 0.0f);
         stream("Hello world.", dummy_voice, [](const float*, size_t) { return true; }, 1);
-        auto end = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration<double, std::milli>(end - start).count();
+        return elapsed_ms(start);
     }
 
     void print_profiling_report() const { g_prof.report(); }
@@ -2032,7 +2040,7 @@ void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallb
     for (size_t si = 0; si < sentences.size(); ++si) {
         auto& prepared = sentences[si];
         if (prepared.empty()) continue;
-        auto eos_extra = calc_eos_extra(prepared, cfg_.eos_extra_frames);
+        auto eos_extra = calc_eos_extra(prepared, cfg_.eos_extra_frames, cfg_.trace);
         auto gen = make_gen(voice, tokenize(prepared), max_frames, eos_extra);
         dec_runner_->reset_state();  // zero existing buffers, no reallocation
 
