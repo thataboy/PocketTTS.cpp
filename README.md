@@ -1,5 +1,7 @@
 # PocketTTS.cpp
 
+**Legacy English experiment:** this branch applies the useful v2 CPU graph rewrites to v1 models. See [build, model directories, and measurements](V1_EXPERIMENTAL.md).
+
 **The fastest open-source TTS engine with voice cloning that runs entirely on CPU.**
 
 Single-file C++ inference runtime for [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), Kyutai's lightweight text-to-speech model. Runs via ONNX Runtime with zero-shot voice cloning from short audio samples.

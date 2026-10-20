@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(pocket_tts VERSION 1.0.0 LANGUAGES CXX C)
+if(POLICY CMP0068)
+    cmake_policy(SET CMP0068 NEW)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -174,6 +177,17 @@ if(BUILD_SHARED_LIB)
 
     target_compile_definitions(pocket-tts-lib PRIVATE PTT_SHARED_LIB)
 
+    if(APPLE)
+        set_target_properties(pocket-tts-lib PROPERTIES
+            BUILD_RPATH "@loader_path"
+            INSTALL_RPATH "@loader_path")
+        add_custom_command(TARGET pocket-tts-lib POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.${ONNXRUNTIME_VERSION}.dylib"
+                "$<TARGET_FILE_DIR:pocket-tts-lib>"
+            VERBATIM)
+    endif()
+
     # Link against the unversioned .so directly and override the SONAME dependency
     # so it looks for libonnxruntime.so (what we ship) not libonnxruntime.so.1
     target_link_libraries(pocket-tts-lib PRIVATE
@@ -206,7 +220,7 @@ if(BUILD_SHARED_LIB)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:pocket-tts-lib>
         )
         find_program(PATCHELF patchelf)
-        if(PATCHELF)
+        if(PATCHELF AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_custom_command(TARGET pocket-tts-lib POST_BUILD
                 COMMAND ${PATCHELF} --replace-needed libonnxruntime.so.1 libonnxruntime.so $<TARGET_FILE:pocket-tts-lib>
                 COMMENT "Patching libonnxruntime SONAME dependency"

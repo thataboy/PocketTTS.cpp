@@ -1,0 +1,4 @@
+# No PyTorch/checkpoint download required when optimizing existing models.
+numpy==2.4.3
+onnx==1.21.0
+onnxruntime==1.24.4

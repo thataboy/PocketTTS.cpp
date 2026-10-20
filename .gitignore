@@ -49,3 +49,9 @@ models/.cache/
 
 italk.yaml
 italk.json
+
+# Export/validation environments and caches
+.venv-*/
+__pycache__/
+*.pyc
+models*/

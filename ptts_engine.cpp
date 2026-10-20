@@ -138,13 +138,13 @@ struct TensorI64 {
 };
 
 struct Config {
-    std::string models_dir = "models", tokenizer_path = "models/tokenizer.model";
+    std::string models_dir = "models", tokenizer_path;
     std::string voices_dir = "voices";
     std::string precision = "int8";
     float temperature = 0.7f;
     float eos_threshold = -4.0f;
     float noise_clamp = 0.0f;
-    int lsd_steps = 1, ar_threads = 0, dec_threads = 0, first_chunk_frames = 1, max_chunk_frames = 15;
+    int lsd_steps = 1, ar_threads = 0, dec_threads = 0, first_chunk_frames = 1, max_chunk_frames = 4;
     int eos_extra_frames = -1;  // -1 = auto-calculate from text length
     uint64_t seed = 0;          // seed for rng, 0 = auto (use time since epoch)
     bool verbose = false;
@@ -1450,6 +1450,7 @@ public:
     static constexpr int SR = 24000;
 
     explicit PocketTTS(const Config& cfg = {}) : cfg_(cfg) {
+        if (cfg_.tokenizer_path.empty()) cfg_.tokenizer_path = cfg_.models_dir + "/tokenizer.model";
         rng::seed(cfg_.seed > 0 ? cfg_.seed : uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         tok_ = std::make_unique<Tokenizer>(cfg_.tokenizer_path);
 
