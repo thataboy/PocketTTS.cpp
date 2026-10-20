@@ -1,0 +1,4 @@
+# Optional local ASR validation; inference/export do not require these packages.
+faster-whisper==1.2.1
+ctranslate2==4.8.3
+av==16.1.0

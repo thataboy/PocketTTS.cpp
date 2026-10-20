@@ -1,5 +1,7 @@
 # PocketTTS.cpp
 
+**V2 multilingual support:** English/French models, INT8, and CPU optimizations are available in the normal executable and shared library. See [V2 build, export, and cache usage](V2.md). The older setup instructions below describe the legacy English exporter.
+
 **The fastest open-source TTS engine with voice cloning that runs entirely on CPU.**
 
 Single-file C++ inference runtime for [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), Kyutai's lightweight text-to-speech model. Runs via ONNX Runtime with zero-shot voice cloning from short audio samples.

@@ -1,0 +1,11 @@
+# Tested on Python 3.12; install pocket3 from the revision pinned in export_onnx_v2.py.
+torch==2.11.0
+numpy==2.4.3
+onnx==1.21.0
+onnxruntime==1.24.4
+tokenizers==0.22.2
+safetensors==0.7.0
+scipy==1.17.1
+pydantic==2.12.5
+huggingface-hub==1.8.0
+PyYAML==6.0.3
