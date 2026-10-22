@@ -32,6 +32,8 @@ def main():
         '<0xE2><0x82><0xAC>', '▁ hello▁world', 'a\t b\r\nc', 'a  b   c    d',
         'It costs 3.14 euros; version 2.0 is ready. Next sentence!',
         'He was born in 1943 (his father, an immigrant, invented a knife).',
+        'She was born in New York in 1943. Her father was a Hungarian Jewish immigrant.',
+        'The poet’s father said, ‘She was born in 1943.’',
         '"Hi?", she said. Another sentence...', 'No punctuation',
         'Ending with a dash—', 'Ending with a dash — ”', "Final comma,')",
         'The number ².³ is unusual. The fraction ½.¼ is unusual.',

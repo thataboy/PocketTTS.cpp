@@ -24,7 +24,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-PINNED_REVISION = "b94db177bc0f77517d9b124843e25605d6f9aed8"
+PINNED_REVISION = "a922b912dfa366975294afb568d815b305acde5d"
 
 
 def flatten(model, capacity, prefix=None):
@@ -147,7 +147,7 @@ def export_patches():
         out = F.scaled_dot_product_attention(
             q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2), mask
         )
-        return self.out_proj(out.transpose(1, 2).reshape(b, length, self.embed_dim))
+        return self.out_proj(out.transpose(1, 2).reshape(b, length, self.attn_dim))
 
     patch(StreamingConv1d, "forward", conv)
     patch(StreamingConvTranspose1d, "forward", convtr)
@@ -1061,6 +1061,20 @@ def main():
         or model.sample_rate != 24000
     ):
         raise ValueError("Milestone runtime supports 1024/32 dimensions at 24 kHz")
+    # The upstream small models use GQA, narrow attention and projected heads.
+    # This export path retains the standard English/French model interface.
+    from pocket_tts.modules.attention import StreamingMultiheadAttention
+
+    if (
+        model.flow_lm.z_proj is not None
+        or any(
+            module.num_kv_heads != module.num_heads
+            or module.attn_dim != module.in_proj.in_features
+            for module in model.modules()
+            if isinstance(module, StreamingMultiheadAttention)
+        )
+    ):
+        raise ValueError("This exporter requires full-width multi-head attention and unprojected heads")
     with tempfile.TemporaryDirectory(
         prefix=target.name + "-", dir=target.parent
     ) as temp:
