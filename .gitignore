@@ -53,3 +53,6 @@ italk.json
 .venv-*/
 __pycache__/
 *.pyc
+
+# Leftover artifacts from the former Rust tokenizer
+/native_tokenizer/target/

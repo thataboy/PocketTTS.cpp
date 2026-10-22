@@ -104,47 +104,10 @@ target_compile_options(sentencepiece-static PRIVATE -w)
 
 set(SENTENCEPIECE_INCLUDE_DIRS "${sentencepiece_SOURCE_DIR}/src")
 
-# Exact Hugging Face JSON tokenization, linked statically (no Python runtime).
-option(POCKET_JSON_TOKENIZER "Build native JSON tokenizer support (requires Cargo)" ON)
+# Native C++ Unigram/Metaspace tokenizer; uses the existing JSON header only.
+option(POCKET_JSON_TOKENIZER "Build native JSON tokenizer support" ON)
 if(POCKET_JSON_TOKENIZER)
-    find_program(CARGO_EXECUTABLE cargo REQUIRED)
-    set(POCKET_RUST_DIR "${CMAKE_BINARY_DIR}/pocket-text")
-    set(POCKET_RUST_TARGET "" CACHE STRING "Optional Rust target triple for cross compilation")
-    set(POCKET_CARGO_TARGET_ARGS "")
-    set(POCKET_RUST_OUTPUT "${POCKET_RUST_DIR}/release")
-    if(POCKET_RUST_TARGET)
-        set(POCKET_CARGO_TARGET_ARGS --target ${POCKET_RUST_TARGET})
-        set(POCKET_RUST_OUTPUT "${POCKET_RUST_DIR}/${POCKET_RUST_TARGET}/release")
-    elseif(CMAKE_CROSSCOMPILING)
-        message(FATAL_ERROR "JSON tokenizer cross compilation requires POCKET_RUST_TARGET and a configured Cargo linker; or disable POCKET_JSON_TOKENIZER for legacy models")
-    endif()
-    set(POCKET_RUST_ENV "")
-    if(APPLE)
-        if(CMAKE_OSX_DEPLOYMENT_TARGET)
-            set(POCKET_RUST_MACOS_MIN "${CMAKE_OSX_DEPLOYMENT_TARGET}")
-        else()
-            set(POCKET_RUST_MACOS_MIN "13.0")
-        endif()
-        list(APPEND POCKET_RUST_ENV "MACOSX_DEPLOYMENT_TARGET=${POCKET_RUST_MACOS_MIN}")
-    endif()
-    if(WIN32)
-        set(POCKET_TEXT_LIB "${POCKET_RUST_OUTPUT}/pocket_text.lib")
-    else()
-        set(POCKET_TEXT_LIB "${POCKET_RUST_OUTPUT}/libpocket_text.a")
-    endif()
-    add_custom_command(OUTPUT "${POCKET_TEXT_LIB}"
-        COMMAND ${CMAKE_COMMAND} -E env
-            "CARGO_HOME=${CMAKE_SOURCE_DIR}/.cache/cargo"
-            "CARGO_TARGET_DIR=${POCKET_RUST_DIR}"
-            ${POCKET_RUST_ENV}
-            ${CARGO_EXECUTABLE} build --release --locked ${POCKET_CARGO_TARGET_ARGS}
-            --manifest-path "${CMAKE_SOURCE_DIR}/native_tokenizer/Cargo.toml"
-        DEPENDS native_tokenizer/src/lib.rs native_tokenizer/Cargo.toml native_tokenizer/Cargo.lock
-        VERBATIM)
-    add_custom_target(pocket-text-build DEPENDS "${POCKET_TEXT_LIB}")
-    add_library(pocket-text STATIC IMPORTED)
-    set_target_properties(pocket-text PROPERTIES IMPORTED_LOCATION "${POCKET_TEXT_LIB}")
-    add_dependencies(pocket-text pocket-text-build)
+    add_library(pocket-text STATIC native_tokenizer/pocket_text.cpp)
 endif()
 
 # dr_libs (header-only) - https://github.com/mackron/dr_libs
@@ -178,11 +141,6 @@ function(configure_pocket_target target_name)
     if(POCKET_JSON_TOKENIZER)
         target_compile_definitions(${target_name} PRIVATE PTT_JSON_TOKENIZER)
         target_link_libraries(${target_name} PRIVATE pocket-text)
-        if(APPLE)
-            target_link_libraries(${target_name} PRIVATE "-framework Security" "-framework SystemConfiguration")
-        elseif(UNIX AND NOT ANDROID)
-            target_link_libraries(${target_name} PRIVATE m dl pthread)
-        endif()
     endif()
     if(ANDROID)
         target_link_libraries(${target_name} PRIVATE log)
@@ -243,9 +201,6 @@ if(BUILD_SHARED_LIB)
     if(POCKET_JSON_TOKENIZER)
         target_compile_definitions(pocket-tts-lib PRIVATE PTT_JSON_TOKENIZER)
         target_link_libraries(pocket-tts-lib PRIVATE pocket-text)
-        if(APPLE)
-            target_link_libraries(pocket-tts-lib PRIVATE "-framework Security" "-framework SystemConfiguration")
-        endif()
     endif()
 
     # Link against the unversioned .so directly and override the SONAME dependency
