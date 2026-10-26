@@ -545,9 +545,8 @@ def validate_int8(directory, manifest):
         )
     if report["flow"]["relative_rmse"] > 0.15:
         raise RuntimeError(f"INT8 flow error exceeds limits: {report['flow']}")
-    # The decoder candidate is measured for the report, but the supported INT8
-    # variant retains the validated FP32 codec to preserve waveform quality.
-    report["decoder_candidate_selected"] = False
+    # Waveform error is reported separately from the listening-quality judgement.
+    report["decoder_candidate_selected"] = True
     print(json.dumps(report, indent=2), flush=True)
     for reference, quantized in zip(
         (mains[0], flows[0], decoders[0]), (mains[1], flows[1], decoders[1])
@@ -569,7 +568,7 @@ def add_int8(directory, manifest):
     from onnxruntime.quantization.onnx_model import ONNXModel
 
     coverage = {}
-    for component in ("flow_lm_main", "flow_lm_flow", "mimi_decoder"):
+    def quantize(component):
         source = directory / (component + ".onnx")
         destination = directory / (component + "_int8.onnx")
         print(f"Quantizing {component}: per-channel QInt8 MatMul", flush=True)
@@ -583,7 +582,9 @@ def add_int8(directory, manifest):
             per_channel=True,
             weight_type=QuantType.QInt8,
             op_types_to_quantize=["MatMul"],
-            extra_options={"MatMulConstBOnly": True},
+            # Existing bundles can contain custom strided FusedMatMul nodes;
+            # generic ONNX inference cannot propagate their known FP32 type.
+            extra_options={"MatMulConstBOnly": True, "DefaultTensorType": onnx.TensorProto.FLOAT},
         )
         quantized = onnx.load(destination)
         onnx.checker.check_model(quantized)
@@ -596,7 +597,9 @@ def add_int8(directory, manifest):
             "int8_bytes": destination.stat().st_size,
         }
         session(destination)  # catch unsupported kernels/interfaces before publication
-    report = validate_int8(directory, manifest)
+
+    for component in ("flow_lm_main", "flow_lm_flow"):
+        quantize(component)
     components = (
         "mimi_encoder",
         "text_conditioner",
@@ -608,24 +611,26 @@ def add_int8(directory, manifest):
         "fp32": {name: name + ".onnx" for name in components},
         "int8": {
             name: name
-            + ("_int8" if name in ("flow_lm_main", "flow_lm_flow") else "")
+            + ("_int8" if name in ("flow_lm_main", "flow_lm_flow", "mimi_decoder") else "")
             + ".onnx"
             for name in components
         },
     }
-    # Quantizing the small codec attention block saves little and has a much
-    # larger waveform error than quantizing the backbone. Retain it in FP32.
-    (directory / "mimi_decoder_int8.onnx").unlink()
-    for name, details in coverage.items():
-        details["selected"] = name != "mimi_decoder"
+    optimize_cpu(directory, manifest)
+    # Quantize after the phase-convolution rewrite so both precisions retain it.
+    # Keep convolutions FP32: static INT8 introduced audible background hiss.
+    quantize("mimi_decoder")
+    report = validate_int8(directory, manifest)
+    for details in coverage.values():
+        details["selected"] = True
     manifest["precision"] = ["fp32", "int8"]
     manifest["quantization"] = {
-        "method": "dynamic",
+        "method": "dynamic MatMul",
         "weights": "QInt8",
-        "activations": "QUInt8 dynamic for quantized MatMul",
+        "activations": "QUInt8; dynamic MatMul",
         "per_channel": True,
         "kv_cache": "float32",
-        "decoder": "float32",
+        "decoder": "dynamic MatMul U8S8; FP32 convolutions",
         "coverage": coverage,
         "component_validation": report,
     }
@@ -991,7 +996,6 @@ def quantize_bundle(source, target, python_source):
             if "_int8" not in name:
                 shutil.copy2(source / name, directory / name)
         manifest = add_int8(directory, manifest)
-        optimize_cpu(directory, manifest)
         write_manifest(directory, manifest)
         directory.rename(target)
     print(f"Validated FP32/INT8 bundle: {target.resolve()}", flush=True)
@@ -1161,7 +1165,8 @@ def main():
         }
         if args.int8:
             manifest = add_int8(directory, manifest)
-        optimize_cpu(directory, manifest)
+        else:
+            optimize_cpu(directory, manifest)
         write_manifest(directory, manifest)
         directory.rename(target)
     print(f"Validated bundle: {target.resolve()}", flush=True)

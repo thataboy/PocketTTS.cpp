@@ -149,11 +149,13 @@ def main():
                     str(args.bundles),
                     "--language",
                     language,
+                    "--precision",
+                    "fp32",
                     "--temperature",
                     "0",
                     "--threads",
                     "1",
-                    "1",
+                    "3",
                     "--voices-dir",
                     cachedir,
                     "--verbose",
@@ -255,7 +257,7 @@ def main():
             lib.ptt_stream_end.argtypes = [ctypes.c_void_p]
             lib.ptt_free_audio.argtypes = [ptr]
             bundle = str((args.bundles / language).resolve()).encode()
-            handle = lib.ptt_create(bundle, cachedir.encode(), None, b"fp32", 0.0, 1, 2)
+            handle = lib.ptt_create(bundle, cachedir.encode(), None, b"fp32", 0.0, 1, 4)
             assert handle, "FFI creation failed"
             try:
                 ffi = []
@@ -286,7 +288,7 @@ def main():
                 assert np.array_equal(ffi[0], outputs[0]), "CLI/FFI mismatch"
             finally:
                 lib.ptt_destroy(handle)
-            handle = lib.ptt_create_bundle(bundle, cachedir.encode(), 2)
+            handle = lib.ptt_create_bundle(bundle, cachedir.encode(), 4)
             assert handle, "Bundle-default FFI creation failed"
             lib.ptt_destroy(handle)
             results.append(
