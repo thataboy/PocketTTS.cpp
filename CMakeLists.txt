@@ -12,8 +12,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+set(POCKET_OUTPUT_DIR "${CMAKE_SOURCE_DIR}" CACHE PATH "Directory for executables and shared libraries")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${POCKET_OUTPUT_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${POCKET_OUTPUT_DIR})
 
 # =============================================================================
 # Dependencies
@@ -123,6 +124,19 @@ FetchContent_MakeAvailable(dr_libs)
 # =============================================================================
 
 option(BUILD_SHARED_LIB "Build libpocket_tts.so for FFI (Deno, Python, etc.)" OFF)
+option(POCKET_ACCELERATE "Enable experimental Apple silicon FP32 decoder/attention ops" OFF)
+if(POCKET_ACCELERATE AND (NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"))
+    message(FATAL_ERROR "POCKET_ACCELERATE requires Apple silicon and Accelerate")
+endif()
+
+if(POCKET_ACCELERATE)
+    add_library(pocket-accelerate INTERFACE)
+    target_compile_definitions(pocket-accelerate INTERFACE PTT_ACCELERATE)
+    target_link_libraries(pocket-accelerate INTERFACE "-framework Accelerate")
+    add_library(pocket-custom-ops SHARED native_accelerate/custom_ops.cpp)
+    target_include_directories(pocket-custom-ops PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(pocket-custom-ops PRIVATE pocket-accelerate)
+endif()
 
 set(POCKET_COMMON_INCLUDE_DIRS
     ${ONNXRUNTIME_INCLUDE_DIR}
@@ -138,6 +152,9 @@ set(POCKET_COMMON_LINK_LIBS
 function(configure_pocket_target target_name)
     target_include_directories(${target_name} PRIVATE ${POCKET_COMMON_INCLUDE_DIRS})
     target_link_libraries(${target_name} PRIVATE ${POCKET_COMMON_LINK_LIBS})
+    if(POCKET_ACCELERATE)
+        target_link_libraries(${target_name} PRIVATE pocket-accelerate)
+    endif()
     if(POCKET_JSON_TOKENIZER)
         target_compile_definitions(${target_name} PRIVATE PTT_JSON_TOKENIZER)
         target_link_libraries(${target_name} PRIVATE pocket-text)
@@ -169,6 +186,10 @@ endfunction()
 add_executable(ptts ptts.cpp)
 configure_pocket_target(ptts)
 target_precompile_headers(ptts PRIVATE "json.hpp")
+if(POCKET_ACCELERATE)
+    add_executable(benchmark-accelerate EXCLUDE_FROM_ALL scripts/benchmark_accelerate.cpp)
+    configure_pocket_target(benchmark-accelerate)
+endif()
 
 if (MSVC)
     target_compile_options(ptts PRIVATE /W4 /WX)
@@ -180,6 +201,9 @@ endif ()
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
 if(BUILD_SHARED_LIB)
     add_library(pocket-tts-lib SHARED ptts_engine.cpp)
+    if(POCKET_ACCELERATE)
+        target_link_libraries(pocket-tts-lib PRIVATE pocket-accelerate)
+    endif()
     set_target_properties(pocket-tts-lib PROPERTIES
         OUTPUT_NAME "ptts"
         BUILD_RPATH "$ORIGIN"

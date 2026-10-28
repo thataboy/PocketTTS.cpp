@@ -51,6 +51,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "native_accelerate/custom_ops.h"
 
 namespace pocket_tts {
 
@@ -209,6 +210,15 @@ static Config resolve_config(Config cfg) {
         const auto& available = manifest.at("precision");
         if (std::find(available.begin(), available.end(), cfg.precision) == available.end())
             throw std::runtime_error("Bundle does not provide requested precision: " + cfg.precision);
+        if (manifest.contains("required_runtime_features")) {
+            for (const auto& feature : manifest.at("required_runtime_features").at(cfg.precision)) {
+#ifdef PTT_ACCELERATE
+                if (feature == "accelerate_conv_v1") continue;
+                if (feature == "accelerate_attention_v1") continue;
+#endif
+                throw std::runtime_error("Bundle requires unavailable runtime feature: " + feature.get<std::string>());
+            }
+        }
         for (const char* component : {"mimi_encoder", "text_conditioner", "flow_lm_main", "flow_lm_flow", "mimi_decoder"}) {
             std::string suffix = cfg.precision == "int8" && std::string(component) != "mimi_encoder" && std::string(component) != "text_conditioner" ? "_int8" : "";
             std::string filename = std::string(component) + suffix + ".onnx";
@@ -1648,6 +1658,10 @@ public:
         auto opts_enc = make_opts_no_arena(threads_full);
         auto opts_ar = make_opts(threads_ar);
         auto opts_dec = make_opts_no_arena(threads_dec);
+#ifdef PTT_ACCELERATE
+        pocket_accel::register_ops(opts_dec);
+        pocket_accel::register_ops(opts_ar);
+#endif
 
         if (cfg_.verbose) {
             std::cout << "\n========== ONNX RUNTIME INFO ==========\n";
