@@ -1,0 +1,5 @@
+#pragma once
+namespace pocket_speech {
+inline const char* english_rules = R"POCKET_RULES(@POCKET_EN_RULES@)POCKET_RULES";
+inline const char* french_rules = R"POCKET_RULES(@POCKET_FR_RULES@)POCKET_RULES";
+}

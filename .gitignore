@@ -11,6 +11,10 @@ pocket-tts
 pocket-server
 pocket-cli
 ptts
+ptts-v2
+ptts-android
+/normalizer-probe
+/benchmark-text-normalization
 *.so
 *.so.*
 *.dylib
@@ -19,13 +23,8 @@ ptts
 *.exe
 *.wav
 
-# ONNX models (too large for git — download from HuggingFace)
-models/*.onnx
-
-# Tokenizer model (bundled with ONNX models)
-models/tokenizer.model
-
 models*/
+models-v?
 
 # Voice samples
 voices/

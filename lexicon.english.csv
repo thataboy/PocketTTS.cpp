@@ -1,0 +1,28 @@
+source,replacement
+Mr.,Mister
+Mrs.,Misses
+Ms.,Miss
+Dr.,Doctor
+AI,eigh-eye
+A.I.,eigh-eye
+LLM,el elle em
+i.e.,that is
+e.g.,for example
+etc.,et cetera
+I.D.,eye-dee
+ID,eye-dee
+pls,please
+MacOS,mac-oh-ess
+Prof.,Professor
+Bros.,Brothers
+Sr.,Senior
+Jr.,Junior
+Det.,Detective
+Capt.,Captain
+Maj.,Major
+Gen.,General
+Col.,Colonel
+Lt.,Lieutenant
+Fig.,Figure
+St.,Saint
+/r\bFY(20\d\d)\b,fiscal year $1

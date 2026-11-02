@@ -140,12 +140,21 @@ void*  ptt_create(const char* models_dir, const char* voices_dir,
 double ptt_warmup(void* handle);
 void   ptt_free_audio(float* samples);
 void   ptt_destroy(void* handle);
+int    ptt_set_text_options(void* handle, int enabled, const char* lexicon_path);
 
 // Streaming
 void*  ptt_stream_start(void* handle, const char* text, const char* voice);
 int    ptt_stream_read(void* stream_ctx, float** out_samples, int* out_len);
 void   ptt_stream_end(void* stream_ctx);
 ```
+
+## Text normalization
+
+English/French number, currency, phone and unit expansion runs in the engine
+before tokenization. Optional `lexicon.english.csv` / `lexicon.french.csv` files
+provide pronunciation substitutions. Use `--lexicon PATH`, `--no-lexicon`, or
+`--no-normalize-text`; see [text normalization](TEXT_NORMALIZATION.md) for rules,
+inspection, limitations and shared-library controls.
 
 ## Caching
 

@@ -735,12 +735,12 @@ private:
 
                 auto elapsed = elapsed_s(t0);
                 double duration = double(total_samples) / PocketTTS::SR;
-                    std::cerr << "  ➡️➡️ " << voice
+                    std::cerr << "\n  ➡️➡️ " << voice
                           << "     len: " << std::fixed << std::setprecision(2)
                                           << duration << "s (" << text.size() << ")"
                           << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                           << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                          << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n"
+                          << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x"
                           << (cfg_.trace ? "\n" : "");
             } catch (const std::exception& e) {
                 send_json_error(client_fd, 400, e.what());
@@ -791,12 +791,12 @@ private:
                 if (send_binary_response(client_fd, "audio/wav", wav)) {
                     auto elapsed = elapsed_s(t0);
                     double duration = static_cast<double>(all_samples.size()) / 24000.0;
-                    std::cerr << "    ➡️ " << voice
+                    std::cerr << "\n    ➡️ " << voice
                               << "    len: " << std::fixed << std::setprecision(2)
                                               << duration << "s (" << text.size() << ")"
                               << " | latency: " << std::fixed << std::setprecision(0) << latency << "ms"
                               << " | time: " << std::fixed << std::setprecision(2) << elapsed << "s"
-                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x\n"
+                              << " | speed: " << (elapsed > 0 ? duration / elapsed : 0) << "x"
                               << (cfg_.trace ? "\n" : "");
                 }
             } catch (const std::exception& e) {
@@ -1070,6 +1070,9 @@ int main(int argc, char* argv[]) {
                 << "  --keep-engines <int>     Idle TTS engines to keep in memory (default: 1)\n"
                 << "  --language <model>       Select a bundle under --models-dir\n"
                 << "  --inspect-text           Print prepared chunks/token IDs without generating audio\n"
+                << "  --lexicon <csv>          Override lexicon.<language>.csv in the working directory\n"
+                << "  --no-lexicon             Disable CSV substitutions\n"
+                << "  --no-normalize-text      Disable speech normalization and CSV substitutions\n"
                 << "  --precision <int8|fp32>  Precision (default: int8)\n"
                 << "  --temperature <float>    Sampling temperature (default: model recommendation)\n"
                 << "  --lsd-steps <int>        Flow matching steps (default: 1)\n"
@@ -1095,6 +1098,9 @@ int main(int argc, char* argv[]) {
         else if (a == "--keep-engines") keep_engines = std::max<size_t>(1, std::stoul(next()));
         else if (a == "--language") cfg.language = next();
         else if (a == "--inspect-text") inspect_text = true;
+        else if (a == "--lexicon") cfg.lexicon_path = next();
+        else if (a == "--no-lexicon") cfg.lexicon_path = "-";
+        else if (a == "--no-normalize-text") cfg.normalize_text = false;
         else if (a == "--precision") cfg.precision = next();
         else if (a == "--temperature") cfg.temperature = std::stof(next());
         else if (a == "--lsd-steps") cfg.lsd_steps = std::stoi(next());
@@ -1127,7 +1133,11 @@ int main(int argc, char* argv[]) {
             auto resolved = pocket_tts::resolve_config(cfg);
             if (!resolved.bundle || nargs != 1) throw std::runtime_error("--inspect-text requires a v2 bundle and one TEXT argument");
             pocket_tts::Tokenizer tokenizer(resolved.tokenizer_path);
-            std::cout << tokenizer.process(text, resolved.model_config).dump(2) << "\n";
+            pocket_speech::Normalizer normalizer(resolved.language, resolved.lexicon_path, resolved.normalize_text);
+            auto normalized = normalizer.process(text);
+            auto result = tokenizer.process(normalized, resolved.model_config);
+            result["normalized_text"] = normalized;
+            std::cout << result.dump(2) << "\n";
             return 0;
         } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
     }

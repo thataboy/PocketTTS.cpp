@@ -20,6 +20,7 @@
 #include <onnxruntime_cxx_api.h>
 #include <sentencepiece_processor.h>
 #include "json.hpp"
+#include "native_text/normalizer.h"
 #ifdef PTT_JSON_TOKENIZER
 #include "native_tokenizer/pocket_text.h"
 #endif
@@ -52,6 +53,19 @@
 #include <thread>
 #include <vector>
 #include "native_accelerate/custom_ops.h"
+
+
+// Define ANSI color codes
+#define RESET   "\033[0m"
+#define BLACK   "\033[30m"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define MAGENTA "\033[35m"
+#define CYAN    "\033[36m"
+#define WHITE   "\033[37m"
+#define GREY    "\033[90m"
 
 namespace pocket_tts {
 
@@ -147,6 +161,8 @@ struct TensorI64 {
 struct Config {
     std::string models_dir = "models", tokenizer_path;
     std::string language = "english";
+    bool normalize_text = true;
+    std::string lexicon_path; // empty = auto; "-" = disabled
     nlohmann::json model_config, model_files;
     int max_seq = 1000;
     bool bundle = false;
@@ -215,6 +231,10 @@ static Config resolve_config(Config cfg) {
 #ifdef PTT_ACCELERATE
                 if (feature == "accelerate_conv_v1") continue;
                 if (feature == "accelerate_attention_v1") continue;
+#else
+                if (feature == "accelerate_attention_v1" || feature == "accelerate_conv_v1")
+                    throw std::runtime_error("Bundle requires unavailable runtime feature: " + feature.get<std::string>() +
+                        ". Reconfigure the build with -DPOCKET_ACCELERATE=ON and rebuild; CMake cache settings override option defaults.");
 #endif
                 throw std::runtime_error("Bundle requires unavailable runtime feature: " + feature.get<std::string>());
             }
@@ -234,6 +254,7 @@ static Config resolve_config(Config cfg) {
             throw std::runtime_error("Bundle decoder chunks must contain 1 to 16 frames");
     } else {
         if (!cfg.language.empty() && !direct_legacy) throw std::runtime_error("Language bundle not found: " + manifest_path);
+        if (cfg.language.empty()) cfg.language = "english";
         if (cfg.precision.empty()) cfg.precision = "int8";
         if (std::isnan(cfg.temperature)) cfg.temperature = 0.7f;
         if (cfg.tokenizer_path.empty()) cfg.tokenizer_path = cfg.models_dir + "/tokenizer.model";
@@ -592,7 +613,6 @@ static int calc_eos_extra(const std::string& text, int eos_extra, bool trace) {
         }
     }
 
-    if (trace) std::cerr << "〔" << text << "〕\n";
     return eos_extra;
 }
 
@@ -1609,6 +1629,7 @@ public:
     static constexpr int SR = 24000;
 
     explicit PocketTTS(const Config& cfg = {}) : cfg_(resolve_config(cfg)) {
+        normalizer_ = std::make_unique<pocket_speech::Normalizer>(cfg_.language, cfg_.lexicon_path, cfg_.normalize_text);
         rng::seed(cfg_.seed > 0 ? cfg_.seed : uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         tok_ = std::make_unique<Tokenizer>(cfg_.tokenizer_path);
 
@@ -1859,8 +1880,18 @@ public:
     void print_profiling_report() const { g_prof.report(); }
     void reset_profiling() { g_prof.reset(); }
 
+    // Call before starting synthesis, as with other engine configuration.
+    void set_text_options(bool enabled, const std::string& lexicon_path) {
+        auto next = std::make_unique<pocket_speech::Normalizer>(cfg_.language, lexicon_path, enabled);
+        normalizer_ = std::move(next);
+        cfg_.normalize_text = enabled;
+        cfg_.lexicon_path = lexicon_path;
+    }
+
 private:
     Config cfg_;
+    std::unique_ptr<pocket_speech::Normalizer> normalizer_;
+    void stream_prepared(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames);
     std::unique_ptr<OrtSession> enc_, txt_, main_, flow_, dec_;
     std::unique_ptr<Tokenizer> tok_;
     std::unique_ptr<StatefulRunner> main_runner_;
@@ -2205,12 +2236,14 @@ AudioData PocketTTS::generate(const std::string& text, const Tensor& voice, int 
         stream(text, voice, [&](const float* s, size_t n) { samples.insert(samples.end(), s, s + n); return true; }, max_frames);
         return {std::move(samples), SR};
     }
-    auto sentences = split_sentences(text);
+    auto normalized = normalizer_->process(text);
+    if (cfg_.trace && normalized != text) std::cerr << "\n" << BLUE << text << RESET;
+    auto sentences = split_sentences(normalized);
 
     if (sentences.size() == 1) {
         std::vector<float> samples;
         samples.reserve(max_frames * 2000);
-        stream(sentences[0], voice, [&](const float* s, size_t n) {
+        stream_prepared(sentences[0], voice, [&](const float* s, size_t n) {
             samples.insert(samples.end(), s, s + n);
             return true;
         }, max_frames);
@@ -2230,7 +2263,7 @@ AudioData PocketTTS::generate(const std::string& text, const Tensor& voice, int 
         }
 
         std::vector<float> chunk_samples;
-        stream(sentences[i], voice, [&](const float* s, size_t n) {
+        stream_prepared(sentences[i], voice, [&](const float* s, size_t n) {
             chunk_samples.insert(chunk_samples.end(), s, s + n);
             return true;
         }, max_frames);
@@ -2258,6 +2291,12 @@ void PocketTTS::stream(const std::string& text, const std::string& voice, Stream
 }
 
 void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames) {
+    auto normalized = normalizer_->process(text);
+    if (cfg_.trace && normalized != text) std::cerr << "\n" << BLUE << text << RESET;
+    stream_prepared(normalized, voice, cb, max_frames);
+}
+
+void PocketTTS::stream_prepared(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames) {
     std::vector<std::string> sentences;
     std::vector<int> bundle_eos;
     if (cfg_.bundle) {
@@ -2272,7 +2311,7 @@ void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallb
         auto& prepared = sentences[si];
         if (prepared.empty()) continue;
         auto eos_extra = cfg_.bundle && cfg_.eos_extra_frames < 0 ? bundle_eos[si] : calc_eos_extra(prepared, cfg_.eos_extra_frames, cfg_.trace);
-        if (cfg_.bundle && cfg_.trace) std::cerr << "〔" << prepared << "〕\n";
+        if (cfg_.trace) std::cerr << "\n〔" << MAGENTA << prepared << RESET << "〕";
         auto gen = make_gen(voice, tokenize(prepared), max_frames, eos_extra);
         dec_runner_->reset_state();  // zero existing buffers, no reallocation
 
@@ -2427,6 +2466,19 @@ void ptt_free_audio(float* samples) {
 
 void ptt_destroy(void* handle) {
     delete static_cast<pocket_tts::PocketTTS*>(handle);
+}
+
+// Configure before synthesis; lexicon_path nullptr = auto, "-" = none.
+// Returns 0 on success, -1 on failure (previous options remain active).
+int ptt_set_text_options(void* handle, int enabled, const char* lexicon_path) {
+    if (!handle) return -1;
+    try {
+        static_cast<pocket_tts::PocketTTS*>(handle)->set_text_options(enabled != 0, lexicon_path ? lexicon_path : "");
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[pocket-tts] text options error: " << e.what() << '\n';
+        return -1;
+    }
 }
 
 // ── Streaming API ───────────────────────────────────────────────────────────

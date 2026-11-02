@@ -105,6 +105,17 @@ target_compile_options(sentencepiece-static PRIVATE -w)
 
 set(SENTENCEPIECE_INCLUDE_DIRS "${sentencepiece_SOURCE_DIR}/src")
 
+# Context-aware speech normalization, shared by legacy/v2 and CLI/FFI builds.
+file(READ "${CMAKE_SOURCE_DIR}/native_text/numbertext/en.sor" POCKET_EN_RULES)
+file(READ "${CMAKE_SOURCE_DIR}/native_text/numbertext/fr.sor" POCKET_FR_RULES)
+configure_file(native_text/numbertext/rules.h.in pocket_number_rules.h @ONLY)
+add_library(pocket-normalizer STATIC native_text/normalizer.cpp native_text/numbertext/Soros.cxx)
+target_include_directories(pocket-normalizer PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+add_executable(normalizer-probe EXCLUDE_FROM_ALL scripts/normalizer_probe.cpp)
+target_link_libraries(normalizer-probe PRIVATE pocket-normalizer)
+add_executable(benchmark-text-normalization EXCLUDE_FROM_ALL scripts/benchmark_text_normalization.cpp)
+target_link_libraries(benchmark-text-normalization PRIVATE pocket-normalizer)
+
 # Native C++ Unigram/Metaspace tokenizer; uses the existing JSON header only.
 option(POCKET_JSON_TOKENIZER "Build native JSON tokenizer support" ON)
 if(POCKET_JSON_TOKENIZER)
@@ -124,7 +135,16 @@ FetchContent_MakeAvailable(dr_libs)
 # =============================================================================
 
 option(BUILD_SHARED_LIB "Build libpocket_tts.so for FFI (Deno, Python, etc.)" OFF)
-option(POCKET_ACCELERATE "Enable experimental Apple silicon FP32 decoder/attention ops" OFF)
+if(ANDROID)
+    set(POCKET_ACCELERATE_DEFAULT OFF)
+else()
+    set(POCKET_ACCELERATE_DEFAULT ON)
+    # suppress deprecation warning
+    option(ACCELERATE_NEW_LAPACK ON)
+    option(ACCELERATE_LAPACK_ILP64 ON)
+endif()
+option(POCKET_ACCELERATE "Enable experimental Apple silicon FP32 decoder/attention ops" ${POCKET_ACCELERATE_DEFAULT})
+message(STATUS "PocketTTS Apple Accelerate: ${POCKET_ACCELERATE}")
 if(POCKET_ACCELERATE AND (NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$"))
     message(FATAL_ERROR "POCKET_ACCELERATE requires Apple silicon and Accelerate")
 endif()
@@ -145,6 +165,7 @@ set(POCKET_COMMON_INCLUDE_DIRS
 )
 
 set(POCKET_COMMON_LINK_LIBS
+    pocket-normalizer
     ${ONNXRUNTIME_LIB}
     sentencepiece-static
 )
@@ -230,6 +251,7 @@ if(BUILD_SHARED_LIB)
     # Link against the unversioned .so directly and override the SONAME dependency
     # so it looks for libonnxruntime.so (what we ship) not libonnxruntime.so.1
     target_link_libraries(pocket-tts-lib PRIVATE
+        pocket-normalizer
         ${ONNXRUNTIME_LIB}
         sentencepiece-static
     )
