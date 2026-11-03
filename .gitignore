@@ -55,3 +55,6 @@ __pycache__/
 
 # Leftover artifacts from the former Rust tokenizer
 /native_tokenizer/target/
+
+# Recoverable local checkpoint cleanup
+/.trash/

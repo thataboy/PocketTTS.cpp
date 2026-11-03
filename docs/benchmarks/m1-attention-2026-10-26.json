@@ -1,0 +1,67 @@
+{
+  "hardware": "Apple M1 CPU",
+  "native_onnxruntime": "1.25.0",
+  "voice": "narrator",
+  "precision": "int8",
+  "temperature": 0.3,
+  "seed": 42,
+  "ar_threads": 1,
+  "decoder_threads": 3,
+  "first_chunk": 1,
+  "max_chunk": 4,
+  "method": "Three order-rotated blocks; five requests per variant/block; discard first two; nine retained warm requests. RTFx is aggregate audio_seconds / generation_seconds. Wall time and TTFA are medians. These predate engine text normalization.",
+  "results": {
+    "250": {
+      "baseline": {
+        "median_seconds": 0.721736083,
+        "rtfx": 18.372997087137787,
+        "ttfa_ms": 35.274874999999994,
+        "rss_mib": 743.28125,
+        "samples": 318720,
+        "n": 9
+      },
+      "attention": {
+        "median_seconds": 0.69879025,
+        "rtfx": 19.404617506294215,
+        "ttfa_ms": 34.476292,
+        "rss_mib": 746.171875,
+        "samples": 326400,
+        "n": 9
+      },
+      "both": {
+        "median_seconds": 0.708421584,
+        "rtfx": 19.19052702605088,
+        "ttfa_ms": 34.610542,
+        "rss_mib": 750.859375,
+        "samples": 326400,
+        "n": 9
+      }
+    },
+    "440": {
+      "baseline": {
+        "median_seconds": 1.283627125,
+        "rtfx": 18.126888736620273,
+        "ttfa_ms": 35.538875,
+        "rss_mib": 747.078125,
+        "samples": 558720,
+        "n": 9
+      },
+      "attention": {
+        "median_seconds": 1.20102725,
+        "rtfx": 19.160182670875265,
+        "ttfa_ms": 34.608042,
+        "rss_mib": 750.109375,
+        "samples": 552960,
+        "n": 9
+      },
+      "both": {
+        "median_seconds": 1.213649375,
+        "rtfx": 18.982425014054236,
+        "ttfa_ms": 34.615166,
+        "rss_mib": 754.8125,
+        "samples": 552960,
+        "n": 9
+      }
+    }
+  }
+}

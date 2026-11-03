@@ -1,0 +1,31 @@
+{
+  "v1_cpu": {
+    "flow_lm_main.onnx": {
+      "reproduced_sha256": "2c64ee5ce052524f503ebb3bc57b2a068bdc9ae047a99b679c08da2af2afa51e",
+      "existing_sha256": "2c64ee5ce052524f503ebb3bc57b2a068bdc9ae047a99b679c08da2af2afa51e",
+      "identical": true
+    },
+    "flow_lm_main_int8.onnx": {
+      "reproduced_sha256": "ef5f3c31d86b679c62aef03712b0665da2ebf67d5b4c3648c12e05c2d982f9f0",
+      "existing_sha256": "ef5f3c31d86b679c62aef03712b0665da2ebf67d5b4c3648c12e05c2d982f9f0",
+      "identical": true
+    },
+    "mimi_decoder.onnx": {
+      "reproduced_sha256": "08ab390d11c5dc377b226a82c6e799e818063884539b3e8f664dd48124d53f0c",
+      "existing_sha256": "08ab390d11c5dc377b226a82c6e799e818063884539b3e8f664dd48124d53f0c",
+      "identical": true
+    },
+    "mimi_decoder_int8.onnx": {
+      "reproduced_sha256": "b88ce7b24f95149dee97431786b55d6410fdb2c53b12d368a8d978d4c16bf837",
+      "existing_sha256": "b88ce7b24f95149dee97431786b55d6410fdb2c53b12d368a8d978d4c16bf837",
+      "identical": true
+    }
+  },
+  "v1_linear": {
+    "mimi_decoder_int8.onnx": {
+      "reproduced_sha256": "6c19fc79bb11c064eefe92cd6155153e874782874c7771fca45093100d859453",
+      "existing_sha256": "6c19fc79bb11c064eefe92cd6155153e874782874c7771fca45093100d859453",
+      "identical": true
+    }
+  }
+}
